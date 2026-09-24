@@ -1,0 +1,30 @@
+Example: https://opendata.dwd.de/weather/nwp/icon-d2/grib/12/
+https://www.researchgate.net/post/How_to_Concatenate_grib2_data_as_a_single_grib2file
+https://code.mpimet.mpg.de/boards/1/topics/10776
+
+
+Variables
+
+t_2m
+relhum_2m
+v_10m
+u_10m
+vmax_10m
+umax_10m
+tot_prec
+cape_ml
+clct
+vis
+
+
+** Algorithm
+
+The following run cycles exist: 0,3,6,9,12,15,18,21
+24/3=8
+
+Time zone is UTC and then it takes about 01h40min until the files are available
+
+So for 1800 forecast, it will be available around 2140
+(2h time difference with DST + 1:40)
+
+now =
