@@ -130,6 +130,7 @@ class TestDownloadFilesWithPrefix:
         assert f"Failed to download {bad}" in out
         assert "Downloaded 1 file(s)" in out
         assert (tmp_path / good).read_bytes() == b"ok"
+        assert not (tmp_path / f"{bad}.tmp").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,12 @@ class TestRunCycleIsUpToDate:
 
         assert dgd.run_cycle_is_up_to_date(self.RUN) is False
 
+    def test_empty_directory_returns_false(self, monkeypatch):
+        index = _index_html("../", "unrelated_file.txt")
+        monkeypatch.setattr(dgd.requests, "get", lambda url, **kw: FakeResponse(text=index))
+
+        assert dgd.run_cycle_is_up_to_date(self.RUN) is False
+
 
 # ---------------------------------------------------------------------------
 # _findlatest
@@ -218,6 +225,13 @@ class TestFindLatest:
             call(datetime(2026, 9, 24, 9)),
             call(datetime(2026, 9, 24, 6)),
         ]
+
+    def test_raises_when_no_cycle_ready_within_max_steps(self, monkeypatch):
+        _frozen_now(monkeypatch, datetime(2026, 9, 24, 12, 0))
+        monkeypatch.setattr(dgd, "run_cycle_is_up_to_date", lambda d: False)
+
+        with pytest.raises(RuntimeError, match="No complete run cycle found"):
+            dgd._findlatest(max_steps=3)
 
     @pytest.mark.parametrize("hour,expected", [(0, 0), (2, 0), (3, 3), (8, 6), (21, 21), (23, 21)])
     def test_rounds_down_to_run_cycle(self, monkeypatch, hour, expected):

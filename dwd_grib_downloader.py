@@ -1,14 +1,14 @@
 import click
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from util import run_command
 import os
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
-RUN_CYCLES = [0,3,6,9,12,15,18,21]
+RUN_CYCLES = [0, 3, 6, 9, 12, 15, 18, 21]
 BASE_URL = "https://opendata.dwd.de/weather/nwp/icon-d2/grib/"
-SINGLE_FIELDS = ["u_10m","v_10m","vmax_10m","tot_prec","t_2m"]
+SINGLE_FIELDS = ["u_10m", "v_10m", "vmax_10m", "tot_prec", "t_2m"]
 FILE_PREFIX = "icon-d2_germany_regular-lat-lon_single-level"
 FILE_SUFFIX = "grib2.bz2"
 OUTPUT_FOLDER = "./downloaded_files"
@@ -46,15 +46,19 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder):
             local_file_path = os.path.join(output_folder, filename)
 
             print(f"Downloading: {filename}...")
+            temp_file_path = f"{local_file_path}.tmp"
             try:
                 # Stream the download so it handles large files smoothly without using too much RAM
                 with requests.get(file_url, stream=True) as file_response:
                     file_response.raise_for_status()
-                    with open(local_file_path, "wb") as f:
+                    with open(temp_file_path, "wb") as f:
                         for chunk in file_response.iter_content(chunk_size=8192):
                             f.write(chunk)
+                os.replace(temp_file_path, local_file_path)
                 download_count += 1
             except requests.exceptions.RequestException as e:
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
                 print(f"Failed to download {filename}: {e}")
 
     print(f"\n✅ Task completed! Downloaded {download_count} file(s) to '{output_folder}'.")
@@ -76,7 +80,7 @@ def _postprocess() -> None:
 def cli():
     pass
 
-def run_cycle_is_up_to_date(run_cycle_date:datetime) -> bool:
+def run_cycle_is_up_to_date(run_cycle_date: datetime) -> bool:
     """
     Check if a run cycle has completed. All files need to have date which corresponds to the recent run cycle.
     Otherwise, it is not ready and it will return False.
@@ -111,16 +115,23 @@ def run_cycle_is_up_to_date(run_cycle_date:datetime) -> bool:
                 else:
                     click.echo(f"Check failed for {run_cycle_date_str} and filename: {filename}")
                     return False
+        if num_ok == 0:
+            click.echo(f"Check failed: no matching files found for {url}")
+            return False
         click.echo(f"{url} {run_cycle_str} PASSED")
     return True
 
-def _findlatest():
-    now = datetime.now()
+def _findlatest(max_steps: int = 8) -> int:
+    now = datetime.now(timezone.utc)
     h = now.hour
 
-    run_cycle_hour = int(h/3)*3
+    run_cycle_hour = (h // 3) * 3
     run_cycle_date = datetime(year=now.year, month=now.month, day=now.day, hour=run_cycle_hour)
+    steps = 0
     while not run_cycle_is_up_to_date(run_cycle_date):
+        steps += 1
+        if steps >= max_steps:
+            raise RuntimeError(f"No complete run cycle found within the last {max_steps * 3} hours.")
         # Stepping back past 00 moves to 21 on the previous day
         run_cycle_date -= timedelta(hours=3)
     click.echo(f"{run_cycle_date} is the most recent complete run cycle")
@@ -131,18 +142,18 @@ def findlatest():
     click.echo('Searching for the most recent valid run cycle')
     _findlatest()
 
-def _download(run_cycle_hour:int):
+def _download(run_cycle_hour: int):
     run_cycle_str = str(run_cycle_hour).zfill(2)
     for sf in SINGLE_FIELDS:
         _download_files_with_prefix(
-            f"https://opendata.dwd.de/weather/nwp/icon-d2/grib/{run_cycle_str}/{sf}/",
+            f"{BASE_URL}{run_cycle_str}/{sf}/",
             FILE_PREFIX,
             FILE_SUFFIX,
             OUTPUT_FOLDER)
 
 @cli.command()
 @click.option('--run_cycle_hour', type=int, help='Run cycle hour')
-def download(run_cycle_hour:int):
+def download(run_cycle_hour: int):
     _download(run_cycle_hour)
 
 @cli.command()
