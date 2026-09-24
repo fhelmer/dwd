@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# IDE
+.idea/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Downloaded and generated GRIB data
+downloaded_files/
+*.grib2
+*.grib2.bz2
