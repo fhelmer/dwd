@@ -1,21 +1,58 @@
+* DWD ICON-D2 GRIB downloader
+
+Downloads the most recent complete ICON-D2 forecast run from DWD open
+data, merges the single-level fields into one GRIB file and cuts out
+southern Sweden.
+
+Source: https://opendata.dwd.de/weather/nwp/icon-d2/grib/
 Example: https://opendata.dwd.de/weather/nwp/icon-d2/grib/12/
-https://www.researchgate.net/post/How_to_Concatenate_grib2_data_as_a_single_grib2file
-https://code.mpimet.mpg.de/boards/1/topics/10776
 
+** Requirements
 
-Variables
+- Python 3 with =click=, =requests= and =beautifulsoup4=
+- =bunzip2=
+- =cdo= (Climate Data Operators)
 
-t_2m
-relhum_2m
-v_10m
-u_10m
-vmax_10m
-umax_10m
-tot_prec
-cape_ml
-clct
-vis
+** Usage
 
+#+begin_src sh
+# Find the most recent run cycle where all fields are available
+python3 dwd_grib_downloader.py findlatest
+
+# Download all fields for a given run cycle hour (0, 3, ..., 21)
+python3 dwd_grib_downloader.py download --run_cycle_hour 12
+
+# Find latest run, download, uncompress, merge and crop
+python3 dwd_grib_downloader.py makefinalgrib
+#+end_src
+
+=makefinalgrib= downloads into =./downloaded_files=, then:
+
+1. =bunzip2 *.bz2=
+2. =cdo merge *.grib2 combined.grib2=
+3. =cdo sellonlatbox,10,14,54,57 combined.grib2 ../combined2.grib2=
+   (lon 10-14, lat 54-57, southern Sweden)
+4. Deletes the intermediate =*.grib2= files
+
+The result is =./combined2.grib2=.
+
+** Variables
+
+Downloaded (=SINGLE_FIELDS= in =dwd_grib_downloader.py=):
+
+- t_2m
+- u_10m
+- v_10m
+- vmax_10m
+- tot_prec
+
+Other available variables:
+
+- relhum_2m
+- umax_10m
+- cape_ml
+- clct
+- vis
 
 ** Algorithm
 
@@ -27,4 +64,21 @@ Time zone is UTC and then it takes about 01h40min until the files are available
 So for 1800 forecast, it will be available around 2140
 (2h time difference with DST + 1:40)
 
-now =
+To find the latest complete run, the current hour is rounded down to the
+nearest run cycle. A run cycle is complete when every file in each
+field's directory has the run cycle timestamp (=YYYYMMDDHH=) in its
+name. If not, step back 3 hours (from 00 to 21 on the previous day) and
+check again.
+
+** Tests
+
+#+begin_src sh
+python3 -m pytest
+#+end_src
+
+Requires =pytest=. HTTP requests are mocked, so no network access is needed.
+
+** References
+
+- https://www.researchgate.net/post/How_to_Concatenate_grib2_data_as_a_single_grib2file
+- https://code.mpimet.mpg.de/boards/1/topics/10776
