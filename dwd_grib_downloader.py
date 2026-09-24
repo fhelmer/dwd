@@ -1,5 +1,5 @@
 import click
-from datetime import datetime
+from datetime import datetime, timedelta
 from util import run_command
 import os
 import requests
@@ -120,16 +120,11 @@ def _findlatest():
 
     run_cycle_hour = int(h/3)*3
     run_cycle_date = datetime(year=now.year, month=now.month, day=now.day, hour=run_cycle_hour)
-    stop_condition = False
-    while not stop_condition:
-        stop_condition = run_cycle_is_up_to_date(run_cycle_date)
-        if not stop_condition:
-            run_cycle_hour -= 3
-            if run_cycle_hour < 0:
-                run_cycle_hour = 21
-            run_cycle_date = datetime(year=now.year, month=now.month, day=now.day, hour=run_cycle_hour)
+    while not run_cycle_is_up_to_date(run_cycle_date):
+        # Stepping back past 00 moves to 21 on the previous day
+        run_cycle_date -= timedelta(hours=3)
     click.echo(f"{run_cycle_date} is the most recent complete run cycle")
-    return run_cycle_hour
+    return run_cycle_date.hour
 
 @cli.command()
 def findlatest():

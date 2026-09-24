@@ -227,8 +227,6 @@ class TestFindLatest:
         assert dgd._findlatest() == expected
         assert expected in dgd.RUN_CYCLES
 
-    @pytest.mark.xfail(strict=True, reason="Known bug: wrapping from 00 to 21 keeps today's date "
-                                           "instead of using the previous day")
     def test_wraps_to_previous_day(self, monkeypatch):
         _frozen_now(monkeypatch, datetime(2026, 9, 24, 1, 0))
         check = MagicMock(side_effect=[False, True])
