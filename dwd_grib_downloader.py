@@ -218,6 +218,64 @@ def _upload(
         click.echo(f"✅ Successfully uploaded {filename} to ftp://{dest_display}")
 
 
+def _download_ftp(
+    filepath: str = FINAL_GRIB_FILE,
+    host: str = DEFAULT_FTP_HOST,
+    user: str | None = None,
+    password: str | None = None,
+    remote_dir: str = DEFAULT_FTP_DIR,
+    port: int = DEFAULT_FTP_PORT,
+    remote_file: str | None = None,
+) -> None:
+    if "/" in host:
+        host_part, _, dir_part = host.partition("/")
+        host = host_part
+        if dir_part and remote_dir == DEFAULT_FTP_DIR:
+            remote_dir = dir_part
+
+    if not user:
+        try:
+            auth = netrc.netrc().authenticators(host)
+            if auth:
+                user = auth[0]
+                if not password:
+                    password = auth[2]
+        except Exception:
+            pass
+
+    if not user:
+        raise RuntimeError(
+            "FTP username is required. Please set FTP_USER environment variable, pass --ftp-user, or configure ~/.netrc."
+        )
+
+    target_dir = remote_dir.strip("/") if not remote_dir.startswith("//") else "/" + remote_dir.lstrip("/")
+    remote_filename = remote_file or os.path.basename(filepath)
+
+    dest_dir = os.path.dirname(filepath)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
+
+    click.echo(f"Connecting to FTP server {host}:{port}...")
+    with ftplib.FTP() as ftp:
+        ftp.connect(host, port)
+        ftp.login(user=user, passwd=password or "")
+        if target_dir:
+            ftp.cwd(target_dir)
+
+        source_display = f"{host}/{target_dir}/{remote_filename}" if target_dir else f"{host}/{remote_filename}"
+        click.echo(f"Downloading {remote_filename} from ftp://{source_display} to {filepath}...")
+        temp_file_path = f"{filepath}.tmp"
+        try:
+            with open(temp_file_path, "wb") as f:
+                ftp.retrbinary(f"RETR {remote_filename}", f.write)
+            os.replace(temp_file_path, filepath)
+        except Exception:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            raise
+        click.echo(f"✅ Successfully downloaded {remote_filename} to {filepath}")
+
+
 def ftp_options(f):
     f = click.option('--ftp-host', envvar='FTP_HOST', default=DEFAULT_FTP_HOST, show_default=True, help='FTP host')(f)
     f = click.option('--ftp-user', envvar=['FTP_USER', 'FTP_USERNAME'], default=None, help='FTP username')(f)
@@ -258,6 +316,51 @@ def upload(filepath: str, ftp_host: str, ftp_user: str | None, ftp_password: str
         remote_dir=ftp_dir,
         port=ftp_port,
     )
+
+
+@cli.command(name="downloadftp")
+@click.option('--file', '-o', '--output', 'filepath', default=FINAL_GRIB_FILE, show_default=True, help='GRIB file to download')
+@click.option('--remote-file', default=None, help='Remote filename on FTP server (defaults to basename of --file)')
+@ftp_options
+def downloadftp(
+    filepath: str,
+    remote_file: str | None,
+    ftp_host: str,
+    ftp_user: str | None,
+    ftp_password: str | None,
+    ftp_dir: str,
+    ftp_port: int,
+):
+    """Download GRIB file from FTP server."""
+    _download_ftp(
+        filepath=filepath,
+        host=ftp_host,
+        user=ftp_user,
+        password=ftp_password,
+        remote_dir=ftp_dir,
+        port=ftp_port,
+        remote_file=remote_file,
+    )
+
+
+cli.add_command(
+    click.Command(
+        "download-ftp",
+        callback=downloadftp.callback,
+        params=downloadftp.params,
+        help=downloadftp.help,
+        hidden=True,
+    )
+)
+cli.add_command(
+    click.Command(
+        "download_ftp",
+        callback=downloadftp.callback,
+        params=downloadftp.params,
+        help=downloadftp.help,
+        hidden=True,
+    )
+)
 
 
 if __name__ == '__main__':

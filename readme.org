@@ -27,6 +27,9 @@ python3 dwd_grib_downloader.py makefinalgrib
 
 # Upload existing GRIB file to FTP server directly
 python3 dwd_grib_downloader.py upload
+
+# Download GRIB file from FTP server directly
+python3 dwd_grib_downloader.py downloadftp
 #+end_src
 
 =makefinalgrib= downloads into =./downloaded_files=, then:
@@ -42,7 +45,7 @@ The result is =./combined2.grib2=.
 
 ** FTP Configuration
 
-FTP upload defaults to =helmer.se/grib= port 21. Credentials can be supplied via environment variables, CLI options, or =~/.netrc=.
+FTP upload and download default to =helmer.se/grib= port 21. Credentials can be supplied via environment variables, CLI options, or =~/.netrc=.
 
 - Environment variables:
   - =FTP_USER= (or =FTP_USERNAME=)
@@ -58,7 +61,8 @@ FTP upload defaults to =helmer.se/grib= port 21. Credentials can be supplied via
   - =--ftp-dir=
   - =--ftp-port=
   - =--skip-upload= (on =makefinalgrib=)
-  - =--file= (on =upload=)
+  - =--file= (on =upload= and =downloadftp=)
+  - =--remote-file= (on =downloadftp=)
 
 ** Variables
 

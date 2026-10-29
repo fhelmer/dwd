@@ -390,6 +390,152 @@ class TestUpload:
 
 
 # ---------------------------------------------------------------------------
+# _download_ftp
+# ---------------------------------------------------------------------------
+
+class TestDownloadFtp:
+    def test_download_ftp_successful(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"FTP_GRIB_CONTENT")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="testuser",
+            password="testpassword",
+            remote_dir="grib",
+            port=21,
+        )
+
+        mock_ftp.connect.assert_called_once_with("helmer.se", 21)
+        mock_ftp.login.assert_called_once_with(user="testuser", passwd="testpassword")
+        mock_ftp.cwd.assert_called_once_with("grib")
+        assert mock_ftp.retrbinary.call_count == 1
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR combined2.grib2"
+        assert dest_file.read_bytes() == b"FTP_GRIB_CONTENT"
+        assert not (tmp_path / "combined2.grib2.tmp").exists()
+
+    def test_download_ftp_missing_user_raises_runtime_error(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        monkeypatch.setattr(dgd.netrc, "netrc", MagicMock(side_effect=FileNotFoundError))
+
+        with pytest.raises(RuntimeError, match="FTP username is required"):
+            dgd._download_ftp(str(dest_file), host="helmer.se", user=None)
+
+    def test_download_ftp_reads_credentials_from_netrc(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        mock_netrc_instance = MagicMock()
+        mock_netrc_instance.authenticators.return_value = ("netrc_user", "account", "netrc_pass")
+        monkeypatch.setattr(dgd.netrc, "netrc", MagicMock(return_value=mock_netrc_instance))
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"NETRC_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(str(dest_file), host="helmer.se", user=None, password=None)
+
+        mock_ftp.login.assert_called_once_with(user="netrc_user", passwd="netrc_pass")
+        assert dest_file.read_bytes() == b"NETRC_DATA"
+
+    def test_download_ftp_splits_host_with_path(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(str(dest_file), host="helmer.se/custom_dir", user="user", password="pwd")
+
+        mock_ftp.connect.assert_called_once_with("helmer.se", 21)
+        mock_ftp.cwd.assert_called_once_with("custom_dir")
+
+    def test_download_ftp_empty_remote_dir(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(str(dest_file), host="helmer.se", user="user", password="pwd", remote_dir="")
+
+        mock_ftp.cwd.assert_not_called()
+
+    def test_download_ftp_custom_remote_file(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "local.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"CUSTOM_REMOTE")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_file="remote_archive.grib2",
+        )
+
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR remote_archive.grib2"
+        assert dest_file.read_bytes() == b"CUSTOM_REMOTE"
+
+    def test_download_ftp_creates_destination_directory(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "sub" / "folder" / "combined2.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"NESTED")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(str(dest_file), host="helmer.se", user="user", password="pwd")
+
+        assert dest_file.read_bytes() == b"NESTED"
+
+    def test_download_ftp_cleans_up_tmp_on_failure(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+
+        def fail_retr(cmd, cb):
+            cb(b"partial_corrupt")
+            raise ftplib.error_perm("550 File not found")
+
+        mock_ftp.retrbinary.side_effect = fail_retr
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        with pytest.raises(ftplib.error_perm, match="550 File not found"):
+            dgd._download_ftp(str(dest_file), host="helmer.se", user="user", password="pwd")
+
+        assert not dest_file.exists()
+        assert not (tmp_path / "combined2.grib2.tmp").exists()
+
+    def test_download_ftp_preserves_existing_file_on_failure(self, monkeypatch, tmp_path):
+        dest_file = tmp_path / "combined2.grib2"
+        dest_file.write_bytes(b"EXISTING_VALID_DATA")
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = ftplib.error_perm("550 Transfer failed")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        with pytest.raises(ftplib.error_perm, match="550 Transfer failed"):
+            dgd._download_ftp(str(dest_file), host="helmer.se", user="user", password="pwd")
+
+        assert dest_file.read_bytes() == b"EXISTING_VALID_DATA"
+        assert not (tmp_path / "combined2.grib2.tmp").exists()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -549,4 +695,108 @@ class TestCli:
             password="envpassword",
             remote_dir="envgrib",
             port=2122,
+        )
+
+    def test_downloadftp_command_defaults(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(dgd.cli, ["downloadftp"])
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath=dgd.FINAL_GRIB_FILE,
+            host="helmer.se",
+            user=None,
+            password=None,
+            remote_dir="grib",
+            port=21,
+            remote_file=None,
+        )
+
+    def test_downloadftp_command_custom_options(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(dgd.cli, [
+            "downloadftp",
+            "--file", "custom.grib2",
+            "--remote-file", "remote_archive.grib2",
+            "--ftp-host", "ftp.example.com",
+            "--ftp-user", "user1",
+            "--ftp-password", "pass1",
+            "--ftp-dir", "weather",
+            "--ftp-port", "2121",
+        ])
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath="custom.grib2",
+            host="ftp.example.com",
+            user="user1",
+            password="pass1",
+            remote_dir="weather",
+            port=2121,
+            remote_file="remote_archive.grib2",
+        )
+
+    def test_downloadftp_command_env_vars(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(
+            dgd.cli,
+            ["downloadftp"],
+            env={
+                "FTP_HOST": "env.helmer.se",
+                "FTP_USER": "envuser",
+                "FTP_PASSWORD": "envpassword",
+                "FTP_DIR": "envgrib",
+                "FTP_PORT": "2122",
+            },
+        )
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath=dgd.FINAL_GRIB_FILE,
+            host="env.helmer.se",
+            user="envuser",
+            password="envpassword",
+            remote_dir="envgrib",
+            port=2122,
+            remote_file=None,
+        )
+
+    def test_download_ftp_alias_command(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(dgd.cli, ["download-ftp"])
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath=dgd.FINAL_GRIB_FILE,
+            host="helmer.se",
+            user=None,
+            password=None,
+            remote_dir="grib",
+            port=21,
+            remote_file=None,
+        )
+
+    def test_download_ftp_underscore_alias_command(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(dgd.cli, ["download_ftp"])
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath=dgd.FINAL_GRIB_FILE,
+            host="helmer.se",
+            user=None,
+            password=None,
+            remote_dir="grib",
+            port=21,
+            remote_file=None,
         )
