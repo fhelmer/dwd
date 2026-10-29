@@ -1,6 +1,8 @@
 import click
 from datetime import datetime, timedelta, timezone
 from util import run_command
+import ftplib
+import netrc
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -12,6 +14,10 @@ SINGLE_FIELDS = ["u_10m", "v_10m", "vmax_10m", "tot_prec", "t_2m"]
 FILE_PREFIX = "icon-d2_germany_regular-lat-lon_single-level"
 FILE_SUFFIX = "grib2.bz2"
 OUTPUT_FOLDER = "./downloaded_files"
+FINAL_GRIB_FILE = "combined2.grib2"
+DEFAULT_FTP_HOST = "helmer.se"
+DEFAULT_FTP_DIR = "grib"
+DEFAULT_FTP_PORT = 21
 
 
 def _download_files_with_prefix(url, prefix, suffix, output_folder):
@@ -156,11 +162,103 @@ def _download(run_cycle_hour: int):
 def download(run_cycle_hour: int):
     _download(run_cycle_hour)
 
+def _upload(
+    filepath: str = FINAL_GRIB_FILE,
+    host: str = DEFAULT_FTP_HOST,
+    user: str | None = None,
+    password: str | None = None,
+    remote_dir: str = DEFAULT_FTP_DIR,
+    port: int = DEFAULT_FTP_PORT,
+) -> None:
+    if "/" in host:
+        host_part, _, dir_part = host.partition("/")
+        host = host_part
+        if dir_part and remote_dir == DEFAULT_FTP_DIR:
+            remote_dir = dir_part
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"GRIB file not found: {filepath}")
+
+    if not user:
+        try:
+            auth = netrc.netrc().authenticators(host)
+            if auth:
+                user = auth[0]
+                if not password:
+                    password = auth[2]
+        except Exception:
+            pass
+
+    if not user:
+        raise RuntimeError(
+            "FTP username is required. Please set FTP_USER environment variable, pass --ftp-user, or configure ~/.netrc."
+        )
+
+    target_dir = remote_dir.strip("/") if not remote_dir.startswith("//") else "/" + remote_dir.lstrip("/")
+    filename = os.path.basename(filepath)
+
+    click.echo(f"Connecting to FTP server {host}:{port}...")
+    with ftplib.FTP() as ftp:
+        ftp.connect(host, port)
+        ftp.login(user=user, passwd=password or "")
+        if target_dir:
+            try:
+                ftp.cwd(target_dir)
+            except ftplib.error_perm:
+                try:
+                    ftp.mkd(target_dir)
+                    ftp.cwd(target_dir)
+                except Exception:
+                    raise
+
+        dest_display = f"{host}/{target_dir}/{filename}" if target_dir else f"{host}/{filename}"
+        click.echo(f"Uploading {filepath} to ftp://{dest_display}...")
+        with open(filepath, "rb") as f:
+            ftp.storbinary(f"STOR {filename}", f)
+        click.echo(f"✅ Successfully uploaded {filename} to ftp://{dest_display}")
+
+
+def ftp_options(f):
+    f = click.option('--ftp-host', envvar='FTP_HOST', default=DEFAULT_FTP_HOST, show_default=True, help='FTP host')(f)
+    f = click.option('--ftp-user', envvar=['FTP_USER', 'FTP_USERNAME'], default=None, help='FTP username')(f)
+    f = click.option('--ftp-password', envvar=['FTP_PASSWORD', 'FTP_PASS'], default=None, help='FTP password')(f)
+    f = click.option('--ftp-dir', envvar='FTP_DIR', default=DEFAULT_FTP_DIR, show_default=True, help='Remote directory on FTP server')(f)
+    f = click.option('--ftp-port', envvar='FTP_PORT', default=DEFAULT_FTP_PORT, show_default=True, type=int, help='FTP port')(f)
+    return f
+
+
 @cli.command()
-def makefinalgrib():
+@click.option('--skip-upload', is_flag=True, default=False, help='Skip FTP upload')
+@ftp_options
+def makefinalgrib(skip_upload: bool, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
     run_cycle_hour = _findlatest()
     _download(run_cycle_hour)
     _postprocess()
+    if not skip_upload:
+        _upload(
+            FINAL_GRIB_FILE,
+            host=ftp_host,
+            user=ftp_user,
+            password=ftp_password,
+            remote_dir=ftp_dir,
+            port=ftp_port,
+        )
+
+
+@cli.command()
+@click.option('--file', 'filepath', default=FINAL_GRIB_FILE, show_default=True, help='GRIB file to upload')
+@ftp_options
+def upload(filepath: str, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
+    """Upload GRIB file to FTP server."""
+    _upload(
+        filepath,
+        host=ftp_host,
+        user=ftp_user,
+        password=ftp_password,
+        remote_dir=ftp_dir,
+        port=ftp_port,
+    )
+
 
 if __name__ == '__main__':
     cli()

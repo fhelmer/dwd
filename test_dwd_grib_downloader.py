@@ -1,3 +1,4 @@
+import ftplib
 from datetime import datetime
 from unittest.mock import MagicMock, call
 
@@ -283,6 +284,112 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _upload
+# ---------------------------------------------------------------------------
+
+class TestUpload:
+    def test_upload_successful(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.write_bytes(b"GRIB_DATA_123")
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        uploaded_data = []
+        mock_ftp.storbinary.side_effect = lambda cmd, fp: uploaded_data.append(fp.read())
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(
+            str(grib_file),
+            host="helmer.se",
+            user="testuser",
+            password="testpassword",
+            remote_dir="grib",
+            port=21,
+        )
+
+        mock_ftp.connect.assert_called_once_with("helmer.se", 21)
+        mock_ftp.login.assert_called_once_with(user="testuser", passwd="testpassword")
+        mock_ftp.cwd.assert_called_once_with("grib")
+        assert mock_ftp.storbinary.call_count == 1
+        call_args = mock_ftp.storbinary.call_args
+        assert call_args[0][0] == "STOR combined2.grib2"
+        assert uploaded_data == [b"GRIB_DATA_123"]
+
+    def test_upload_file_not_found(self):
+        with pytest.raises(FileNotFoundError, match="GRIB file not found"):
+            dgd._upload(
+                "nonexistent_file.grib2",
+                host="helmer.se",
+                user="testuser",
+                password="secret",
+            )
+
+    def test_upload_missing_user_raises_runtime_error(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.touch()
+
+        monkeypatch.setattr(dgd.netrc, "netrc", MagicMock(side_effect=FileNotFoundError))
+
+        with pytest.raises(RuntimeError, match="FTP username is required"):
+            dgd._upload(str(grib_file), host="helmer.se", user=None)
+
+    def test_upload_reads_credentials_from_netrc(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.touch()
+
+        mock_netrc_instance = MagicMock()
+        mock_netrc_instance.authenticators.return_value = ("netrc_user", "account", "netrc_pass")
+        monkeypatch.setattr(dgd.netrc, "netrc", MagicMock(return_value=mock_netrc_instance))
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(str(grib_file), host="helmer.se", user=None, password=None)
+
+        mock_ftp.login.assert_called_once_with(user="netrc_user", passwd="netrc_pass")
+
+    def test_upload_splits_host_with_path(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(str(grib_file), host="helmer.se/custom_dir", user="user", password="pwd")
+
+        mock_ftp.connect.assert_called_once_with("helmer.se", 21)
+        mock_ftp.cwd.assert_called_once_with("custom_dir")
+
+    def test_upload_creates_remote_dir_if_not_exists(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.cwd.side_effect = [ftplib.error_perm("550 Directory not found"), None]
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(str(grib_file), host="helmer.se", user="user", password="pwd", remote_dir="grib")
+
+        mock_ftp.mkd.assert_called_once_with("grib")
+        assert mock_ftp.cwd.call_count == 2
+
+    def test_upload_empty_remote_dir(self, monkeypatch, tmp_path):
+        grib_file = tmp_path / "combined2.grib2"
+        grib_file.touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(str(grib_file), host="helmer.se", user="user", password="pwd", remote_dir="")
+
+        mock_ftp.cwd.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -320,8 +427,126 @@ class TestCli:
         monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
         monkeypatch.setattr(dgd, "_download", order._download)
         monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
 
         result = CliRunner().invoke(dgd.cli, ["makefinalgrib"])
 
         assert result.exit_code == 0
+        assert order.mock_calls == [
+            call._findlatest(),
+            call._download(18),
+            call._postprocess(),
+            call._upload(
+                dgd.FINAL_GRIB_FILE,
+                host="helmer.se",
+                user=None,
+                password=None,
+                remote_dir="grib",
+                port=21,
+            ),
+        ]
+
+    def test_makefinalgrib_skip_upload(self, monkeypatch):
+        order = MagicMock()
+        order._findlatest.return_value = 18
+        monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
+        monkeypatch.setattr(dgd, "_download", order._download)
+        monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--skip-upload"])
+
+        assert result.exit_code == 0
         assert order.mock_calls == [call._findlatest(), call._download(18), call._postprocess()]
+
+    def test_makefinalgrib_passes_ftp_options(self, monkeypatch):
+        upload = MagicMock()
+        monkeypatch.setattr(dgd, "_findlatest", MagicMock(return_value=12))
+        monkeypatch.setattr(dgd, "_download", MagicMock())
+        monkeypatch.setattr(dgd, "_postprocess", MagicMock())
+        monkeypatch.setattr(dgd, "_upload", upload)
+
+        result = CliRunner().invoke(dgd.cli, [
+            "makefinalgrib",
+            "--ftp-host", "other.host",
+            "--ftp-user", "myuser",
+            "--ftp-password", "mypass",
+            "--ftp-dir", "custom/dir",
+            "--ftp-port", "2121",
+        ])
+
+        assert result.exit_code == 0
+        upload.assert_called_once_with(
+            dgd.FINAL_GRIB_FILE,
+            host="other.host",
+            user="myuser",
+            password="mypass",
+            remote_dir="custom/dir",
+            port=2121,
+        )
+
+    def test_upload_command_defaults(self, monkeypatch):
+        upload = MagicMock()
+        monkeypatch.setattr(dgd, "_upload", upload)
+
+        result = CliRunner().invoke(dgd.cli, ["upload"])
+
+        assert result.exit_code == 0
+        upload.assert_called_once_with(
+            dgd.FINAL_GRIB_FILE,
+            host="helmer.se",
+            user=None,
+            password=None,
+            remote_dir="grib",
+            port=21,
+        )
+
+    def test_upload_command_custom_options(self, monkeypatch):
+        upload = MagicMock()
+        monkeypatch.setattr(dgd, "_upload", upload)
+
+        result = CliRunner().invoke(dgd.cli, [
+            "upload",
+            "--file", "custom.grib2",
+            "--ftp-host", "ftp.example.com",
+            "--ftp-user", "user1",
+            "--ftp-password", "pass1",
+            "--ftp-dir", "weather",
+            "--ftp-port", "2121",
+        ])
+
+        assert result.exit_code == 0
+        upload.assert_called_once_with(
+            "custom.grib2",
+            host="ftp.example.com",
+            user="user1",
+            password="pass1",
+            remote_dir="weather",
+            port=2121,
+        )
+
+    def test_upload_command_env_vars(self, monkeypatch):
+        upload = MagicMock()
+        monkeypatch.setattr(dgd, "_upload", upload)
+
+        result = CliRunner().invoke(
+            dgd.cli,
+            ["upload"],
+            env={
+                "FTP_HOST": "env.helmer.se",
+                "FTP_USER": "envuser",
+                "FTP_PASSWORD": "envpassword",
+                "FTP_DIR": "envgrib",
+                "FTP_PORT": "2122",
+            },
+        )
+
+        assert result.exit_code == 0
+        upload.assert_called_once_with(
+            dgd.FINAL_GRIB_FILE,
+            host="env.helmer.se",
+            user="envuser",
+            password="envpassword",
+            remote_dir="envgrib",
+            port=2122,
+        )

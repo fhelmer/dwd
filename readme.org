@@ -22,8 +22,11 @@ python3 dwd_grib_downloader.py findlatest
 # Download all fields for a given run cycle hour (0, 3, ..., 21)
 python3 dwd_grib_downloader.py download --run_cycle_hour 12
 
-# Find latest run, download, uncompress, merge and crop
+# Find latest run, download, uncompress, merge, crop and upload to FTP
 python3 dwd_grib_downloader.py makefinalgrib
+
+# Upload existing GRIB file to FTP server directly
+python3 dwd_grib_downloader.py upload
 #+end_src
 
 =makefinalgrib= downloads into =./downloaded_files=, then:
@@ -33,8 +36,29 @@ python3 dwd_grib_downloader.py makefinalgrib
 3. =cdo sellonlatbox,10,14,54,57 combined.grib2 ../combined2.grib2=
    (lon 10-14, lat 54-57, southern Sweden)
 4. Deletes the intermediate =*.grib2= files
+5. Uploads =./combined2.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
 
 The result is =./combined2.grib2=.
+
+** FTP Configuration
+
+FTP upload defaults to =helmer.se/grib= port 21. Credentials can be supplied via environment variables, CLI options, or =~/.netrc=.
+
+- Environment variables:
+  - =FTP_USER= (or =FTP_USERNAME=)
+  - =FTP_PASSWORD= (or =FTP_PASS=)
+  - =FTP_HOST= (default: =helmer.se=)
+  - =FTP_DIR= (default: =grib=)
+  - =FTP_PORT= (default: =21=)
+
+- CLI options:
+  - =--ftp-host=
+  - =--ftp-user=
+  - =--ftp-password=
+  - =--ftp-dir=
+  - =--ftp-port=
+  - =--skip-upload= (on =makefinalgrib=)
+  - =--file= (on =upload=)
 
 ** Variables
 
