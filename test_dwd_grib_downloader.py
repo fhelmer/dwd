@@ -212,7 +212,7 @@ class TestFindLatest:
         check = MagicMock(return_value=True)
         monkeypatch.setattr(dgd, "run_cycle_is_up_to_date", check)
 
-        assert dgd._findlatest() == 12
+        assert dgd._findlatest() == datetime(2026, 9, 24, 12)
         check.assert_called_once_with(datetime(2026, 9, 24, 12))
 
     def test_steps_back_until_ready(self, monkeypatch):
@@ -220,7 +220,7 @@ class TestFindLatest:
         check = MagicMock(side_effect=[False, False, True])
         monkeypatch.setattr(dgd, "run_cycle_is_up_to_date", check)
 
-        assert dgd._findlatest() == 6
+        assert dgd._findlatest() == datetime(2026, 9, 24, 6)
         assert check.call_args_list == [
             call(datetime(2026, 9, 24, 12)),
             call(datetime(2026, 9, 24, 9)),
@@ -239,7 +239,7 @@ class TestFindLatest:
         _frozen_now(monkeypatch, datetime(2026, 9, 24, hour, 59))
         monkeypatch.setattr(dgd, "run_cycle_is_up_to_date", lambda d: True)
 
-        assert dgd._findlatest() == expected
+        assert dgd._findlatest() == datetime(2026, 9, 24, expected)
         assert expected in dgd.RUN_CYCLES
 
     def test_wraps_to_previous_day(self, monkeypatch):
@@ -247,13 +247,18 @@ class TestFindLatest:
         check = MagicMock(side_effect=[False, True])
         monkeypatch.setattr(dgd, "run_cycle_is_up_to_date", check)
 
-        assert dgd._findlatest() == 21
+        assert dgd._findlatest() == datetime(2026, 9, 23, 21)
         assert check.call_args_list[1] == call(datetime(2026, 9, 23, 21))
 
 
 # ---------------------------------------------------------------------------
 # _download / _postprocess
 # ---------------------------------------------------------------------------
+
+def test_get_grib_filename():
+    assert dgd.get_grib_filename(datetime(2026, 9, 24, 12)) == "2026092412.grib2"
+    assert dgd.get_grib_filename(datetime(2026, 1, 5, 3)) == "2026010503.grib2"
+
 
 def test_download_fetches_every_single_field(monkeypatch):
     fetch = MagicMock()
@@ -271,13 +276,29 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch):
     run = MagicMock()
     monkeypatch.setattr(dgd, "run_command", run)
 
+    dgd._postprocess("2026092412.grib2")
+
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert cmds == [
+        "bunzip2 *.bz2",
+        "cdo merge *.grib2 combined.grib2",
+        "cdo sellonlatbox,10,14,54,57 combined.grib2 ../2026092412.grib2",
+        "rm *.grib2",
+    ]
+    assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
+
+
+def test_postprocess_defaults_to_final_grib_file(monkeypatch):
+    run = MagicMock()
+    monkeypatch.setattr(dgd, "run_command", run)
+
     dgd._postprocess()
 
     cmds = [c.args[0] for c in run.call_args_list]
     assert cmds == [
         "bunzip2 *.bz2",
         "cdo merge *.grib2 combined.grib2",
-        "cdo sellonlatbox,10,14,54,57 combined.grib2 ../combined2.grib2",
+        f"cdo sellonlatbox,10,14,54,57 combined.grib2 ../{dgd.FINAL_GRIB_FILE}",
         "rm *.grib2",
     ]
     assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
@@ -569,7 +590,7 @@ class TestCli:
 
     def test_makefinalgrib_chains_steps(self, monkeypatch):
         order = MagicMock()
-        order._findlatest.return_value = 18
+        order._findlatest.return_value = datetime(2026, 9, 24, 18)
         monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
         monkeypatch.setattr(dgd, "_download", order._download)
         monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
@@ -581,9 +602,9 @@ class TestCli:
         assert order.mock_calls == [
             call._findlatest(),
             call._download(18),
-            call._postprocess(),
+            call._postprocess("2026092418.grib2"),
             call._upload(
-                dgd.FINAL_GRIB_FILE,
+                "2026092418.grib2",
                 host="helmer.se",
                 user=None,
                 password=None,
@@ -594,7 +615,7 @@ class TestCli:
 
     def test_makefinalgrib_skip_upload(self, monkeypatch):
         order = MagicMock()
-        order._findlatest.return_value = 18
+        order._findlatest.return_value = datetime(2026, 9, 24, 18)
         monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
         monkeypatch.setattr(dgd, "_download", order._download)
         monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
@@ -603,11 +624,15 @@ class TestCli:
         result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--skip-upload"])
 
         assert result.exit_code == 0
-        assert order.mock_calls == [call._findlatest(), call._download(18), call._postprocess()]
+        assert order.mock_calls == [
+            call._findlatest(),
+            call._download(18),
+            call._postprocess("2026092418.grib2"),
+        ]
 
     def test_makefinalgrib_passes_ftp_options(self, monkeypatch):
         upload = MagicMock()
-        monkeypatch.setattr(dgd, "_findlatest", MagicMock(return_value=12))
+        monkeypatch.setattr(dgd, "_findlatest", MagicMock(return_value=datetime(2026, 9, 24, 12)))
         monkeypatch.setattr(dgd, "_download", MagicMock())
         monkeypatch.setattr(dgd, "_postprocess", MagicMock())
         monkeypatch.setattr(dgd, "_upload", upload)
@@ -623,7 +648,7 @@ class TestCli:
 
         assert result.exit_code == 0
         upload.assert_called_once_with(
-            dgd.FINAL_GRIB_FILE,
+            "2026092412.grib2",
             host="other.host",
             user="myuser",
             password="mypass",

@@ -36,12 +36,12 @@ python3 dwd_grib_downloader.py downloadftp
 
 1. =bunzip2 *.bz2=
 2. =cdo merge *.grib2 combined.grib2=
-3. =cdo sellonlatbox,10,14,54,57 combined.grib2 ../combined2.grib2=
+3. =cdo sellonlatbox,10,14,54,57 combined.grib2 ../YYYYMMDDHH.grib2=
    (lon 10-14, lat 54-57, southern Sweden)
 4. Deletes the intermediate =*.grib2= files
-5. Uploads =./combined2.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
+5. Uploads =./YYYYMMDDHH.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
 
-The result is =./combined2.grib2=.
+The result is =./YYYYMMDDHH.grib2= (e.g. =./2026110112.grib2=).
 
 ** FTP Configuration
 

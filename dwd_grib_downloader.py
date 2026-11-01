@@ -20,6 +20,10 @@ DEFAULT_FTP_DIR = "grib"
 DEFAULT_FTP_PORT = 21
 
 
+def get_grib_filename(run_cycle: datetime) -> str:
+    return f"{run_cycle.strftime('%Y%m%d%H')}.grib2"
+
+
 def _download_files_with_prefix(url, prefix, suffix, output_folder):
     # Ensure the output directory exists
     os.makedirs(output_folder, exist_ok=True)
@@ -70,16 +74,18 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder):
     print(f"\n✅ Task completed! Downloaded {download_count} file(s) to '{output_folder}'.")
 
 
-def _postprocess() -> None:
+def _postprocess(output_file: str | None = None) -> str:
+    filename = os.path.basename(output_file) if output_file else FINAL_GRIB_FILE
     click.echo("Uncompressing files...")
     run_command("bunzip2 *.bz2", cwd=OUTPUT_FOLDER)
     click.echo("Done. Merging all gribfiles into one ...")
     run_command("cdo merge *.grib2 combined.grib2", cwd=OUTPUT_FOLDER)
     click.echo("Done. Separate file for southern Sweden ...")
-    run_command("cdo sellonlatbox,10,14,54,57 combined.grib2 ../combined2.grib2", cwd=OUTPUT_FOLDER)
+    run_command(f"cdo sellonlatbox,10,14,54,57 combined.grib2 ../{filename}", cwd=OUTPUT_FOLDER)
     click.echo("Done. Deleting all intermediate files ...")
     run_command("rm *.grib2", cwd=OUTPUT_FOLDER)
     click.echo("\n✅DONE")
+    return filename
 
 
 @click.group()
@@ -127,7 +133,7 @@ def run_cycle_is_up_to_date(run_cycle_date: datetime) -> bool:
         click.echo(f"{url} {run_cycle_str} PASSED")
     return True
 
-def _findlatest(max_steps: int = 8) -> int:
+def _findlatest(max_steps: int = 8) -> datetime:
     now = datetime.now(timezone.utc)
     h = now.hour
 
@@ -141,14 +147,16 @@ def _findlatest(max_steps: int = 8) -> int:
         # Stepping back past 00 moves to 21 on the previous day
         run_cycle_date -= timedelta(hours=3)
     click.echo(f"{run_cycle_date} is the most recent complete run cycle")
-    return run_cycle_date.hour
+    return run_cycle_date
 
 @cli.command()
 def findlatest():
     click.echo('Searching for the most recent valid run cycle')
     _findlatest()
 
-def _download(run_cycle_hour: int):
+def _download(run_cycle_hour: int | datetime):
+    if isinstance(run_cycle_hour, datetime):
+        run_cycle_hour = run_cycle_hour.hour
     run_cycle_str = str(run_cycle_hour).zfill(2)
     for sf in SINGLE_FIELDS:
         _download_files_with_prefix(
@@ -289,12 +297,19 @@ def ftp_options(f):
 @click.option('--skip-upload', is_flag=True, default=False, help='Skip FTP upload')
 @ftp_options
 def makefinalgrib(skip_upload: bool, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
-    run_cycle_hour = _findlatest()
+    run_cycle = _findlatest()
+    if isinstance(run_cycle, datetime):
+        run_cycle_hour = run_cycle.hour
+        filename = get_grib_filename(run_cycle)
+    else:
+        run_cycle_hour = int(run_cycle)
+        now = datetime.now(timezone.utc)
+        filename = f"{now.strftime('%Y%m%d')}{str(run_cycle_hour).zfill(2)}.grib2"
     _download(run_cycle_hour)
-    _postprocess()
+    _postprocess(filename)
     if not skip_upload:
         _upload(
-            FINAL_GRIB_FILE,
+            filename,
             host=ftp_host,
             user=ftp_user,
             password=ftp_password,
