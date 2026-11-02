@@ -4,13 +4,14 @@ from util import run_command
 import ftplib
 import netrc
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
 RUN_CYCLES = [0, 3, 6, 9, 12, 15, 18, 21]
 BASE_URL = "https://opendata.dwd.de/weather/nwp/icon-d2/grib/"
-SINGLE_FIELDS = ["u_10m", "v_10m", "vmax_10m", "tot_prec", "t_2m"]
+SINGLE_FIELDS = ["u_10m", "v_10m", "vmax_10m", "tot_prec", "t_2m", "cape_ml", "h_snow", "pmsl", "clct"]
 FILE_PREFIX = "icon-d2_germany_regular-lat-lon_single-level"
 FILE_SUFFIX = "grib2.bz2"
 OUTPUT_FOLDER = "./downloaded_files"
@@ -22,6 +23,50 @@ DEFAULT_FTP_PORT = 21
 
 def get_grib_filename(run_cycle: datetime) -> str:
     return f"{run_cycle.strftime('%Y%m%d%H')}.grib2"
+
+
+def _to_naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def parse_grib_filename(filename: str) -> datetime | None:
+    """Extract run cycle datetime from a GRIB filename like '2026110118.grib2'."""
+    basename = os.path.basename(filename)
+    match = re.match(r"^(\d{10})\.grib2$", basename)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d%H")
+    except ValueError:
+        return None
+
+
+def find_latest_grib_file(filenames: list[str]) -> tuple[datetime, str] | None:
+    """Find the most recent GRIB file with a valid run cycle timestamp from a list of filenames."""
+    latest_dt = None
+    latest_fn = None
+    for fn in filenames:
+        dt = parse_grib_filename(fn)
+        if dt is not None:
+            if latest_dt is None or dt > latest_dt:
+                latest_dt = dt
+                latest_fn = fn
+    if latest_dt is not None and latest_fn is not None:
+        return latest_dt, latest_fn
+    return None
+
+
+def find_latest_local_grib(directory: str = ".") -> tuple[datetime, str] | None:
+    """Find the most recent timestamped GRIB file in the given local directory."""
+    if not os.path.isdir(directory):
+        return None
+    try:
+        filenames = os.listdir(directory)
+    except OSError:
+        return None
+    return find_latest_grib_file(filenames)
 
 
 def _download_files_with_prefix(url, prefix, suffix, output_folder):
@@ -80,8 +125,10 @@ def _postprocess(output_file: str | None = None) -> str:
     run_command("bunzip2 *.bz2", cwd=OUTPUT_FOLDER)
     click.echo("Done. Merging all gribfiles into one ...")
     run_command("cdo merge *.grib2 combined.grib2", cwd=OUTPUT_FOLDER)
+    click.echo("Done. Cleaning time series ...")
+    run_command("cdo select,minute=0 combined.grib2 final.grib2", cwd=OUTPUT_FOLDER)
     click.echo("Done. Separate file for southern Sweden ...")
-    run_command(f"cdo sellonlatbox,10,14,54,57 combined.grib2 ../{filename}", cwd=OUTPUT_FOLDER)
+    run_command(f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{filename}", cwd=OUTPUT_FOLDER)
     click.echo("Done. Deleting all intermediate files ...")
     run_command("rm *.grib2", cwd=OUTPUT_FOLDER)
     click.echo("\n✅DONE")
@@ -234,6 +281,7 @@ def _download_ftp(
     remote_dir: str = DEFAULT_FTP_DIR,
     port: int = DEFAULT_FTP_PORT,
     remote_file: str | None = None,
+    update: bool = False,
 ) -> None:
     if "/" in host:
         host_part, _, dir_part = host.partition("/")
@@ -257,11 +305,9 @@ def _download_ftp(
         )
 
     target_dir = remote_dir.strip("/") if not remote_dir.startswith("//") else "/" + remote_dir.lstrip("/")
-    remote_filename = remote_file or os.path.basename(filepath)
 
     dest_dir = os.path.dirname(filepath)
-    if dest_dir:
-        os.makedirs(dest_dir, exist_ok=True)
+    local_dir = dest_dir if dest_dir else "."
 
     click.echo(f"Connecting to FTP server {host}:{port}...")
     with ftplib.FTP() as ftp:
@@ -270,18 +316,54 @@ def _download_ftp(
         if target_dir:
             ftp.cwd(target_dir)
 
+        if update:
+            if remote_file:
+                remote_filename = remote_file
+                remote_cycle = parse_grib_filename(remote_filename)
+            else:
+                remote_files = [os.path.basename(f) for f in ftp.nlst()]
+                latest_remote = find_latest_grib_file(remote_files)
+                if not latest_remote:
+                    click.echo("No timestamped GRIB files found on FTP server.")
+                    return
+                remote_cycle, remote_filename = latest_remote
+
+            if remote_cycle is not None:
+                latest_local = find_latest_local_grib(local_dir)
+                if latest_local is not None:
+                    local_cycle, local_filename = latest_local
+                    if _to_naive_utc(remote_cycle) <= _to_naive_utc(local_cycle):
+                        click.echo(
+                            f"Already up to date: local file {local_filename} is as new or newer than remote {remote_filename}."
+                        )
+                        return
+
+            if os.path.isdir(filepath):
+                target_filepath = os.path.join(filepath, remote_filename)
+            elif os.path.basename(filepath) == FINAL_GRIB_FILE:
+                target_filepath = os.path.join(dest_dir, remote_filename) if dest_dir else remote_filename
+            else:
+                target_filepath = filepath
+        else:
+            remote_filename = remote_file or os.path.basename(filepath)
+            target_filepath = filepath
+
+        target_dest_dir = os.path.dirname(target_filepath)
+        if target_dest_dir:
+            os.makedirs(target_dest_dir, exist_ok=True)
+
         source_display = f"{host}/{target_dir}/{remote_filename}" if target_dir else f"{host}/{remote_filename}"
-        click.echo(f"Downloading {remote_filename} from ftp://{source_display} to {filepath}...")
-        temp_file_path = f"{filepath}.tmp"
+        click.echo(f"Downloading {remote_filename} from ftp://{source_display} to {target_filepath}...")
+        temp_file_path = f"{target_filepath}.tmp"
         try:
             with open(temp_file_path, "wb") as f:
                 ftp.retrbinary(f"RETR {remote_filename}", f.write)
-            os.replace(temp_file_path, filepath)
+            os.replace(temp_file_path, target_filepath)
         except Exception:
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
             raise
-        click.echo(f"✅ Successfully downloaded {remote_filename} to {filepath}")
+        click.echo(f"✅ Successfully downloaded {remote_filename} to {target_filepath}")
 
 
 def ftp_options(f):
@@ -295,16 +377,38 @@ def ftp_options(f):
 
 @cli.command()
 @click.option('--skip-upload', is_flag=True, default=False, help='Skip FTP upload')
+@click.option('--update', is_flag=True, default=False, help='Download and build only if there is a newer run cycle')
 @ftp_options
-def makefinalgrib(skip_upload: bool, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
+def makefinalgrib(
+    skip_upload: bool,
+    update: bool,
+    ftp_host: str,
+    ftp_user: str | None,
+    ftp_password: str | None,
+    ftp_dir: str,
+    ftp_port: int,
+):
     run_cycle = _findlatest()
     if isinstance(run_cycle, datetime):
         run_cycle_hour = run_cycle.hour
         filename = get_grib_filename(run_cycle)
+        run_cycle_date = run_cycle
     else:
         run_cycle_hour = int(run_cycle)
         now = datetime.now(timezone.utc)
         filename = f"{now.strftime('%Y%m%d')}{str(run_cycle_hour).zfill(2)}.grib2"
+        run_cycle_date = datetime(year=now.year, month=now.month, day=now.day, hour=run_cycle_hour)
+
+    if update:
+        latest_local = find_latest_local_grib()
+        if latest_local is not None:
+            local_cycle, local_filename = latest_local
+            if _to_naive_utc(run_cycle_date) <= _to_naive_utc(local_cycle):
+                click.echo(
+                    f"Already up to date: local file {local_filename} is as new or newer than latest run cycle {filename}."
+                )
+                return
+
     _download(run_cycle_hour)
     _postprocess(filename)
     if not skip_upload:
@@ -336,10 +440,12 @@ def upload(filepath: str, ftp_host: str, ftp_user: str | None, ftp_password: str
 @cli.command(name="downloadftp")
 @click.option('--file', '-o', '--output', 'filepath', default=FINAL_GRIB_FILE, show_default=True, help='GRIB file to download')
 @click.option('--remote-file', default=None, help='Remote filename on FTP server (defaults to basename of --file)')
+@click.option('--update', is_flag=True, default=False, help='Download only if there is a newer run cycle')
 @ftp_options
 def downloadftp(
     filepath: str,
     remote_file: str | None,
+    update: bool,
     ftp_host: str,
     ftp_user: str | None,
     ftp_password: str | None,
@@ -355,6 +461,7 @@ def downloadftp(
         remote_dir=ftp_dir,
         port=ftp_port,
         remote_file=remote_file,
+        update=update,
     )
 
 

@@ -260,6 +260,41 @@ def test_get_grib_filename():
     assert dgd.get_grib_filename(datetime(2026, 1, 5, 3)) == "2026010503.grib2"
 
 
+def test_to_naive_utc():
+    from datetime import timezone
+    naive = datetime(2026, 9, 24, 12)
+    assert dgd._to_naive_utc(naive) == naive
+
+    aware = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+    assert dgd._to_naive_utc(aware) == naive
+
+
+def test_parse_grib_filename():
+    assert dgd.parse_grib_filename("2026110118.grib2") == datetime(2026, 11, 1, 18)
+    assert dgd.parse_grib_filename("path/to/2026092403.grib2") == datetime(2026, 9, 24, 3)
+    assert dgd.parse_grib_filename("combined2.grib2") is None
+    assert dgd.parse_grib_filename("other.txt") is None
+    assert dgd.parse_grib_filename("2026110118.grib2.tmp") is None
+    assert dgd.parse_grib_filename("2026130118.grib2") is None  # invalid month 13
+
+
+def test_find_latest_grib_file():
+    files = ["2026110106.grib2", "combined2.grib2", "2026110118.grib2", "2026110112.grib2"]
+    assert dgd.find_latest_grib_file(files) == (datetime(2026, 11, 1, 18), "2026110118.grib2")
+    assert dgd.find_latest_grib_file(["invalid.txt", "combined2.grib2"]) is None
+    assert dgd.find_latest_grib_file([]) is None
+
+
+def test_find_latest_local_grib(tmp_path):
+    (tmp_path / "2026110106.grib2").touch()
+    (tmp_path / "2026110118.grib2").touch()
+    (tmp_path / "2026110112.grib2").touch()
+    (tmp_path / "combined2.grib2").touch()
+
+    assert dgd.find_latest_local_grib(str(tmp_path)) == (datetime(2026, 11, 1, 18), "2026110118.grib2")
+    assert dgd.find_latest_local_grib(str(tmp_path / "nonexistent")) is None
+
+
 def test_download_fetches_every_single_field(monkeypatch):
     fetch = MagicMock()
     monkeypatch.setattr(dgd, "_download_files_with_prefix", fetch)
@@ -282,7 +317,8 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch):
     assert cmds == [
         "bunzip2 *.bz2",
         "cdo merge *.grib2 combined.grib2",
-        "cdo sellonlatbox,10,14,54,57 combined.grib2 ../2026092412.grib2",
+        "cdo select,minute=0 combined.grib2 final.grib2",
+        "cdo sellonlatbox,10,14,54,57 final.grib2 ../2026092412.grib2",
         "rm *.grib2",
     ]
     assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
@@ -298,7 +334,8 @@ def test_postprocess_defaults_to_final_grib_file(monkeypatch):
     assert cmds == [
         "bunzip2 *.bz2",
         "cdo merge *.grib2 combined.grib2",
-        f"cdo sellonlatbox,10,14,54,57 combined.grib2 ../{dgd.FINAL_GRIB_FILE}",
+        "cdo select,minute=0 combined.grib2 final.grib2",
+        f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{dgd.FINAL_GRIB_FILE}",
         "rm *.grib2",
     ]
     assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
@@ -555,6 +592,147 @@ class TestDownloadFtp:
         assert dest_file.read_bytes() == b"EXISTING_VALID_DATA"
         assert not (tmp_path / "combined2.grib2.tmp").exists()
 
+    def test_download_ftp_update_newer_remote_downloads(self, monkeypatch, tmp_path):
+        (tmp_path / "2026110112.grib2").touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["2026110112.grib2", "2026110118.grib2", "notes.txt"]
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"NEW_GRIB_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_dir="grib",
+            update=True,
+        )
+
+        mock_ftp.nlst.assert_called_once()
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR 2026110118.grib2"
+        assert (tmp_path / "2026110118.grib2").read_bytes() == b"NEW_GRIB_DATA"
+
+    def test_download_ftp_update_already_up_to_date_skips(self, monkeypatch, tmp_path):
+        (tmp_path / "2026110118.grib2").touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["2026110112.grib2", "2026110118.grib2"]
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_dir="grib",
+            update=True,
+        )
+
+        mock_ftp.nlst.assert_called_once()
+        mock_ftp.retrbinary.assert_not_called()
+
+    def test_download_ftp_update_no_local_files_downloads(self, monkeypatch, tmp_path):
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["2026110118.grib2"]
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_dir="grib",
+            update=True,
+        )
+
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR 2026110118.grib2"
+        assert (tmp_path / "2026110118.grib2").read_bytes() == b"DATA"
+
+    def test_download_ftp_update_no_timestamped_files_skips(self, monkeypatch, tmp_path):
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["readme.txt", "combined.grib"]
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            update=True,
+        )
+
+        mock_ftp.retrbinary.assert_not_called()
+
+    def test_download_ftp_update_with_explicit_remote_file_already_current(self, monkeypatch, tmp_path):
+        (tmp_path / "2026110118.grib2").touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_file="2026110118.grib2",
+            update=True,
+        )
+
+        mock_ftp.retrbinary.assert_not_called()
+
+    def test_download_ftp_update_nlst_with_paths(self, monkeypatch, tmp_path):
+        (tmp_path / "2026110112.grib2").touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["grib/2026110112.grib2", "grib/2026110118.grib2"]
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"PATH_GRIB_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "combined2.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_dir="grib",
+            update=True,
+        )
+
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR 2026110118.grib2"
+        assert (tmp_path / "2026110118.grib2").read_bytes() == b"PATH_GRIB_DATA"
+
+    def test_download_ftp_update_non_timestamped_remote_file(self, monkeypatch, tmp_path):
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"CUSTOM_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "custom.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            remote_file="custom.grib2",
+            update=True,
+        )
+
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR custom.grib2"
+        assert dest_file.read_bytes() == b"CUSTOM_DATA"
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -656,6 +834,85 @@ class TestCli:
             port=2121,
         )
 
+    def test_makefinalgrib_update_when_newer(self, monkeypatch):
+        order = MagicMock()
+        order._findlatest.return_value = datetime(2026, 9, 24, 18)
+        monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
+        monkeypatch.setattr(dgd, "_download", order._download)
+        monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
+        monkeypatch.setattr(
+            dgd,
+            "find_latest_local_grib",
+            MagicMock(return_value=(datetime(2026, 9, 24, 12), "2026092412.grib2")),
+        )
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--update"])
+
+        assert result.exit_code == 0
+        assert order._download.call_count == 1
+        assert order._postprocess.call_count == 1
+        assert order._upload.call_count == 1
+
+    def test_makefinalgrib_update_when_already_up_to_date(self, monkeypatch):
+        order = MagicMock()
+        order._findlatest.return_value = datetime(2026, 9, 24, 18)
+        monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
+        monkeypatch.setattr(dgd, "_download", order._download)
+        monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
+        monkeypatch.setattr(
+            dgd,
+            "find_latest_local_grib",
+            MagicMock(return_value=(datetime(2026, 9, 24, 18), "2026092418.grib2")),
+        )
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--update"])
+
+        assert result.exit_code == 0
+        assert "Already up to date" in result.output
+        order._download.assert_not_called()
+        order._postprocess.assert_not_called()
+        order._upload.assert_not_called()
+
+    def test_makefinalgrib_update_no_local_files(self, monkeypatch):
+        order = MagicMock()
+        order._findlatest.return_value = datetime(2026, 9, 24, 18)
+        monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
+        monkeypatch.setattr(dgd, "_download", order._download)
+        monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
+        monkeypatch.setattr(dgd, "find_latest_local_grib", MagicMock(return_value=None))
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--update"])
+
+        assert result.exit_code == 0
+        assert order._download.call_count == 1
+        assert order._postprocess.call_count == 1
+        assert order._upload.call_count == 1
+
+    def test_makefinalgrib_update_with_int_cycle_up_to_date(self, monkeypatch):
+        _frozen_now(monkeypatch, datetime(2026, 9, 24, 20, 0))
+        order = MagicMock()
+        order._findlatest.return_value = 18
+        monkeypatch.setattr(dgd, "_findlatest", order._findlatest)
+        monkeypatch.setattr(dgd, "_download", order._download)
+        monkeypatch.setattr(dgd, "_postprocess", order._postprocess)
+        monkeypatch.setattr(dgd, "_upload", order._upload)
+        monkeypatch.setattr(
+            dgd,
+            "find_latest_local_grib",
+            MagicMock(return_value=(datetime(2026, 9, 24, 18), "2026092418.grib2")),
+        )
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--update"])
+
+        assert result.exit_code == 0
+        assert "Already up to date" in result.output
+        order._download.assert_not_called()
+        order._postprocess.assert_not_called()
+        order._upload.assert_not_called()
+
     def test_upload_command_defaults(self, monkeypatch):
         upload = MagicMock()
         monkeypatch.setattr(dgd, "_upload", upload)
@@ -737,6 +994,25 @@ class TestCli:
             remote_dir="grib",
             port=21,
             remote_file=None,
+            update=False,
+        )
+
+    def test_downloadftp_command_update_flag(self, monkeypatch):
+        download_ftp = MagicMock()
+        monkeypatch.setattr(dgd, "_download_ftp", download_ftp)
+
+        result = CliRunner().invoke(dgd.cli, ["downloadftp", "--update"])
+
+        assert result.exit_code == 0
+        download_ftp.assert_called_once_with(
+            filepath=dgd.FINAL_GRIB_FILE,
+            host="helmer.se",
+            user=None,
+            password=None,
+            remote_dir="grib",
+            port=21,
+            remote_file=None,
+            update=True,
         )
 
     def test_downloadftp_command_custom_options(self, monkeypatch):
@@ -763,6 +1039,7 @@ class TestCli:
             remote_dir="weather",
             port=2121,
             remote_file="remote_archive.grib2",
+            update=False,
         )
 
     def test_downloadftp_command_env_vars(self, monkeypatch):
@@ -790,6 +1067,7 @@ class TestCli:
             remote_dir="envgrib",
             port=2122,
             remote_file=None,
+            update=False,
         )
 
     def test_download_ftp_alias_command(self, monkeypatch):
@@ -807,6 +1085,7 @@ class TestCli:
             remote_dir="grib",
             port=21,
             remote_file=None,
+            update=False,
         )
 
     def test_download_ftp_underscore_alias_command(self, monkeypatch):
@@ -824,4 +1103,5 @@ class TestCli:
             remote_dir="grib",
             port=21,
             remote_file=None,
+            update=False,
         )

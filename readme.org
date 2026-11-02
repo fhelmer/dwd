@@ -25,21 +25,28 @@ python3 dwd_grib_downloader.py download --run_cycle_hour 12
 # Find latest run, download, uncompress, merge, crop and upload to FTP
 python3 dwd_grib_downloader.py makefinalgrib
 
+# Only build and download if there is a newer run cycle than existing local GRIB files
+python3 dwd_grib_downloader.py makefinalgrib --update
+
 # Upload existing GRIB file to FTP server directly
 python3 dwd_grib_downloader.py upload
 
 # Download GRIB file from FTP server directly
 python3 dwd_grib_downloader.py downloadftp
+
+# Download from FTP only if there is a newer run cycle than existing local GRIB files
+python3 dwd_grib_downloader.py downloadftp --update
 #+end_src
 
 =makefinalgrib= downloads into =./downloaded_files=, then:
 
 1. =bunzip2 *.bz2=
 2. =cdo merge *.grib2 combined.grib2=
-3. =cdo sellonlatbox,10,14,54,57 combined.grib2 ../YYYYMMDDHH.grib2=
+3. =cdo select,minute=0 combined.grib2 final.grib2=
+4. =cdo sellonlatbox,10,14,54,57 final.grib2 ../YYYYMMDDHH.grib2=
    (lon 10-14, lat 54-57, southern Sweden)
-4. Deletes the intermediate =*.grib2= files
-5. Uploads =./YYYYMMDDHH.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
+5. Deletes the intermediate =*.grib2= files
+6. Uploads =./YYYYMMDDHH.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
 
 The result is =./YYYYMMDDHH.grib2= (e.g. =./2026110112.grib2=).
 
@@ -61,6 +68,7 @@ FTP upload and download default to =helmer.se/grib= port 21. Credentials can be 
   - =--ftp-dir=
   - =--ftp-port=
   - =--skip-upload= (on =makefinalgrib=)
+  - =--update= (on =makefinalgrib= and =downloadftp=, only download if a newer run cycle exists)
   - =--file= (on =upload= and =downloadftp=)
   - =--remote-file= (on =downloadftp=)
 
@@ -68,18 +76,20 @@ FTP upload and download default to =helmer.se/grib= port 21. Credentials can be 
 
 Downloaded (=SINGLE_FIELDS= in =dwd_grib_downloader.py=):
 
+- cape_ml
+- clct
+- h_snow
+- pmsl
 - t_2m
+- tot_prec
 - u_10m
 - v_10m
 - vmax_10m
-- tot_prec
 
 Other available variables:
 
 - relhum_2m
 - umax_10m
-- cape_ml
-- clct
 - vis
 
 ** Algorithm
