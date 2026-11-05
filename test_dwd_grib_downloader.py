@@ -133,6 +133,73 @@ class TestDownloadFilesWithPrefix:
         assert (tmp_path / good).read_bytes() == b"ok"
         assert not (tmp_path / f"{bad}.tmp").exists()
 
+    def test_skips_already_downloaded_non_empty_files(self, monkeypatch, tmp_path, capsys):
+        match1 = _filename("2026092412", "000")
+        match2 = _filename("2026092412", "001")
+        # Pre-create match1
+        (tmp_path / match1).write_bytes(b"existing_content")
+
+        requested = []
+        def get(url, **kw):
+            requested.append(url)
+            if url == self.URL:
+                return FakeResponse(text=_index_html(match1, match2))
+            return FakeResponse(chunks=[b"new_content"])
+
+        monkeypatch.setattr(dgd.requests, "get", get)
+
+        dgd._download_files_with_prefix(self.URL, dgd.FILE_PREFIX, dgd.FILE_SUFFIX, str(tmp_path))
+
+        out = capsys.readouterr().out
+        assert f"File {match1} already exists, skipping..." in out
+        assert "Downloaded 2 file(s)" in out
+        assert (tmp_path / match1).read_bytes() == b"existing_content"
+        assert (tmp_path / match2).read_bytes() == b"new_content"
+        assert (self.URL + match1) not in requested
+        assert (self.URL + match2) in requested
+
+    def test_retries_transient_failure_and_succeeds(self, monkeypatch, tmp_path, capsys):
+        match = _filename("2026092412", "000")
+        attempts = 0
+
+        def get(url, **kw):
+            nonlocal attempts
+            if url == self.URL:
+                return FakeResponse(text=_index_html(match))
+            attempts += 1
+            if attempts == 1:
+                raise requests.exceptions.ConnectionError("Connection reset by peer")
+            return FakeResponse(chunks=[b"recovered_data"])
+
+        monkeypatch.setattr(dgd.requests, "get", get)
+        monkeypatch.setattr(dgd, "FILE_RETRY_BACKOFF", 0.001)
+
+        dgd._download_files_with_prefix(self.URL, dgd.FILE_PREFIX, dgd.FILE_SUFFIX, str(tmp_path))
+
+        assert attempts == 2
+        assert (tmp_path / match).read_bytes() == b"recovered_data"
+        assert not (tmp_path / f"{match}.tmp").exists()
+        out = capsys.readouterr().out
+        assert "Downloaded 1 file(s)" in out
+
+
+# ---------------------------------------------------------------------------
+# HTTP Session and Retries
+# ---------------------------------------------------------------------------
+
+class TestHttpSession:
+    def test_get_session_configuration(self):
+        session = dgd.get_session(reset=True)
+        assert session.headers["User-Agent"] == dgd.USER_AGENT
+        for prefix in ("https://", "http://"):
+            adapter = session.adapters.get(prefix)
+            assert adapter is not None
+            assert adapter.max_retries.total == 5
+            assert adapter.max_retries.connect == 5
+            assert adapter.max_retries.read == 5
+            assert 429 in adapter.max_retries.status_forcelist
+            assert 503 in adapter.max_retries.status_forcelist
+
 
 # ---------------------------------------------------------------------------
 # run_cycle_is_up_to_date

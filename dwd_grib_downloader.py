@@ -5,7 +5,10 @@ import ftplib
 import netrc
 import os
 import re
+import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
@@ -19,6 +22,45 @@ FINAL_GRIB_FILE = "combined2.grib2"
 DEFAULT_FTP_HOST = "helmer.se"
 DEFAULT_FTP_DIR = "grib"
 DEFAULT_FTP_PORT = 21
+
+DEFAULT_TIMEOUT = (10, 60)
+USER_AGENT = "dwd-grib-downloader/1.0 (https://opendata.dwd.de; weather data ingest)"
+MAX_FILE_RETRIES = 3
+FILE_RETRY_BACKOFF = 0.2
+
+_ORIGINAL_REQUESTS_GET = requests.get
+_session: requests.Session | None = None
+
+
+def get_session(reset: bool = False) -> requests.Session:
+    """Return a shared requests.Session configured with connection pooling, retries, and User-Agent."""
+    global _session
+    if _session is None or reset:
+        if _session is not None:
+            _session.close()
+        _session = requests.Session()
+        retries = Retry(
+            total=5,
+            connect=5,
+            read=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+        _session.mount("https://", adapter)
+        _session.mount("http://", adapter)
+        _session.headers.update({"User-Agent": USER_AGENT})
+    return _session
+
+
+def _http_get(url: str, session: requests.Session | None = None, **kwargs):
+    """Perform HTTP GET using persistent session, or fall back to requests.get if monkeypatched."""
+    if requests.get != _ORIGINAL_REQUESTS_GET:
+        return requests.get(url, **kwargs)
+    sess = session or get_session()
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    return sess.get(url, **kwargs)
 
 
 def get_grib_filename(run_cycle: datetime) -> str:
@@ -69,13 +111,13 @@ def find_latest_local_grib(directory: str = ".") -> tuple[datetime, str] | None:
     return find_latest_grib_file(filenames)
 
 
-def _download_files_with_prefix(url, prefix, suffix, output_folder):
+def _download_files_with_prefix(url, prefix, suffix, output_folder, session=None):
     # Ensure the output directory exists
     os.makedirs(output_folder, exist_ok=True)
 
     print(f"Connecting to {url}...")
     try:
-        response = requests.get(url)
+        response = _http_get(url, session=session)
         # Check if the page loaded successfully
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
@@ -100,21 +142,31 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder):
             file_url = urljoin(url, href)
             local_file_path = os.path.join(output_folder, filename)
 
+            if os.path.exists(local_file_path) and os.path.getsize(local_file_path) > 0:
+                print(f"File {filename} already exists, skipping...")
+                download_count += 1
+                continue
+
             print(f"Downloading: {filename}...")
             temp_file_path = f"{local_file_path}.tmp"
-            try:
-                # Stream the download so it handles large files smoothly without using too much RAM
-                with requests.get(file_url, stream=True) as file_response:
-                    file_response.raise_for_status()
-                    with open(temp_file_path, "wb") as f:
-                        for chunk in file_response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                os.replace(temp_file_path, local_file_path)
-                download_count += 1
-            except requests.exceptions.RequestException as e:
-                if os.path.exists(temp_file_path):
-                    os.remove(temp_file_path)
-                print(f"Failed to download {filename}: {e}")
+            for attempt in range(1, MAX_FILE_RETRIES + 1):
+                try:
+                    # Stream the download so it handles large files smoothly without using too much RAM
+                    with _http_get(file_url, session=session, stream=True) as file_response:
+                        file_response.raise_for_status()
+                        with open(temp_file_path, "wb") as f:
+                            for chunk in file_response.iter_content(chunk_size=65536):
+                                f.write(chunk)
+                    os.replace(temp_file_path, local_file_path)
+                    download_count += 1
+                    break
+                except requests.exceptions.RequestException as e:
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
+                    if attempt < MAX_FILE_RETRIES:
+                        time.sleep(FILE_RETRY_BACKOFF * attempt)
+                    else:
+                        print(f"Failed to download {filename}: {e}")
 
     print(f"\n✅ Task completed! Downloaded {download_count} file(s) to '{output_folder}'.")
 
@@ -149,7 +201,7 @@ def run_cycle_is_up_to_date(run_cycle_date: datetime) -> bool:
     for sf in SINGLE_FIELDS:
         url = f"{BASE_URL}{run_cycle_str}/{sf}/"
         try:
-            response = requests.get(url)
+            response = _http_get(url)
             # Check if the page loaded successfully
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
