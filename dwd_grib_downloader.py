@@ -147,7 +147,7 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder, session=None
                 download_count += 1
                 continue
 
-            print(f"Downloading: {filename}...")
+            click.echo(f"\rDownloading: {filename}...", nl=False)
             temp_file_path = f"{local_file_path}.tmp"
             for attempt in range(1, MAX_FILE_RETRIES + 1):
                 try:
