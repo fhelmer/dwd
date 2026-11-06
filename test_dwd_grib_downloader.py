@@ -374,7 +374,10 @@ def test_download_fetches_every_single_field(monkeypatch):
     ]
 
 
-def test_postprocess_runs_pipeline_in_order(monkeypatch):
+def test_postprocess_runs_pipeline_in_order(monkeypatch, tmp_path):
+    (tmp_path / "b.bz2").touch()
+    (tmp_path / "a.bz2").touch()
+    monkeypatch.setattr(dgd, "OUTPUT_FOLDER", str(tmp_path))
     run = MagicMock()
     monkeypatch.setattr(dgd, "run_command", run)
 
@@ -382,13 +385,71 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch):
 
     cmds = [c.args[0] for c in run.call_args_list]
     assert cmds == [
-        "bunzip2 *.bz2",
+        "bunzip2 a.bz2",
+        "bunzip2 b.bz2",
         "cdo merge *.grib2 combined.grib2",
         "cdo select,minute=0 combined.grib2 final.grib2",
         "cdo sellonlatbox,10,14,54,57 final.grib2 ../2026092412.grib2",
         "rm *.grib2",
     ]
-    assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
+    assert all(c.kwargs["cwd"] == str(tmp_path) for c in run.call_args_list)
+
+
+def test_uncompress_files_shows_running_counter(capsys, monkeypatch, tmp_path):
+    (tmp_path / "file2.bz2").touch()
+    (tmp_path / "file1.bz2").touch()
+    (tmp_path / "file3.bz2").touch()
+    (tmp_path / "ignored.txt").touch()
+
+    run = MagicMock()
+    monkeypatch.setattr(dgd, "run_command", run)
+
+    dgd._uncompress_files(str(tmp_path))
+
+    assert [c.args[0] for c in run.call_args_list] == [
+        "bunzip2 file1.bz2",
+        "bunzip2 file2.bz2",
+        "bunzip2 file3.bz2",
+    ]
+    assert all(c.kwargs["cwd"] == str(tmp_path) for c in run.call_args_list)
+
+    out = capsys.readouterr().out
+    assert "\rUncompressing files: 1/3..." in out
+    assert "\rUncompressing files: 2/3..." in out
+    assert "\rUncompressing files: 3/3..." in out
+
+
+def test_uncompress_files_no_files(capsys, monkeypatch, tmp_path):
+    run = MagicMock()
+    monkeypatch.setattr(dgd, "run_command", run)
+
+    dgd._uncompress_files(str(tmp_path))
+
+    run.assert_not_called()
+    assert "No .bz2 files found to uncompress." in capsys.readouterr().out
+
+
+def test_uncompress_files_nonexistent_directory(capsys, monkeypatch, tmp_path):
+    run = MagicMock()
+    monkeypatch.setattr(dgd, "run_command", run)
+
+    dgd._uncompress_files(str(tmp_path / "nonexistent"))
+
+    run.assert_not_called()
+    assert "No .bz2 files found to uncompress." in capsys.readouterr().out
+
+
+def test_uncompress_files_quotes_filenames(monkeypatch, tmp_path):
+    (tmp_path / "file with spaces.bz2").touch()
+
+    run = MagicMock()
+    monkeypatch.setattr(dgd, "run_command", run)
+
+    dgd._uncompress_files(str(tmp_path))
+
+    assert [c.args[0] for c in run.call_args_list] == [
+        "bunzip2 'file with spaces.bz2'",
+    ]
 
 
 # ---------------------------------------------------------------------------

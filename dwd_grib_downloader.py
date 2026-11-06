@@ -5,6 +5,7 @@ import ftplib
 import netrc
 import os
 import re
+import shlex
 import time
 import requests
 from requests.adapters import HTTPAdapter
@@ -170,18 +171,40 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder, session=None
     print(f"\n✅ Task completed! Downloaded {download_count} file(s) to '{output_folder}'.")
 
 
-def _postprocess(output_file: str) -> str:
+def _uncompress_files(output_folder: str = OUTPUT_FOLDER) -> None:
+    if not os.path.isdir(output_folder):
+        click.echo("No .bz2 files found to uncompress.")
+        return
+    bz2_files = sorted(
+        [
+            f
+            for f in os.listdir(output_folder)
+            if f.endswith(".bz2") and os.path.isfile(os.path.join(output_folder, f))
+        ]
+    )
+    total = len(bz2_files)
+    if total == 0:
+        click.echo("No .bz2 files found to uncompress.")
+        return
+    for i, filename in enumerate(bz2_files, 1):
+        click.echo(f"\rUncompressing files: {i}/{total}...", nl=False)
+        run_command(f"bunzip2 {shlex.quote(filename)}", cwd=output_folder)
+    click.echo()
+
+
+def _postprocess(output_file: str, output_folder: str | None = None) -> str:
+    if output_folder is None:
+        output_folder = OUTPUT_FOLDER
     filename = os.path.basename(output_file)
-    click.echo("Uncompressing files...")
-    run_command("bunzip2 *.bz2", cwd=OUTPUT_FOLDER)
+    _uncompress_files(output_folder)
     click.echo("Done. Merging all gribfiles into one ...")
-    run_command("cdo merge *.grib2 combined.grib2", cwd=OUTPUT_FOLDER)
+    run_command("cdo merge *.grib2 combined.grib2", cwd=output_folder)
     click.echo("Done. Cleaning time series ...")
-    run_command("cdo select,minute=0 combined.grib2 final.grib2", cwd=OUTPUT_FOLDER)
+    run_command("cdo select,minute=0 combined.grib2 final.grib2", cwd=output_folder)
     click.echo("Done. Separate file for southern Sweden ...")
-    run_command(f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{filename}", cwd=OUTPUT_FOLDER)
+    run_command(f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{filename}", cwd=output_folder)
     click.echo("Done. Deleting all intermediate files ...")
-    run_command("rm *.grib2", cwd=OUTPUT_FOLDER)
+    run_command("rm *.grib2", cwd=output_folder)
     click.echo("\n✅DONE")
     return filename
 
