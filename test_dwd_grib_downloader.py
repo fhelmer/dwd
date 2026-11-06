@@ -391,23 +391,6 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch):
     assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
 
 
-def test_postprocess_defaults_to_final_grib_file(monkeypatch):
-    run = MagicMock()
-    monkeypatch.setattr(dgd, "run_command", run)
-
-    dgd._postprocess()
-
-    cmds = [c.args[0] for c in run.call_args_list]
-    assert cmds == [
-        "bunzip2 *.bz2",
-        "cdo merge *.grib2 combined.grib2",
-        "cdo select,minute=0 combined.grib2 final.grib2",
-        f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{dgd.FINAL_GRIB_FILE}",
-        "rm *.grib2",
-    ]
-    assert all(c.kwargs["cwd"] == dgd.OUTPUT_FOLDER for c in run.call_args_list)
-
-
 # ---------------------------------------------------------------------------
 # _upload
 # ---------------------------------------------------------------------------
@@ -512,6 +495,33 @@ class TestUpload:
         dgd._upload(str(grib_file), host="helmer.se", user="user", password="pwd", remote_dir="")
 
         mock_ftp.cwd.assert_not_called()
+
+    def test_upload_default_finds_latest_local(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "2026110112.grib2").write_bytes(b"OLD_DATA")
+        (tmp_path / "2026110118.grib2").write_bytes(b"LATEST_DATA")
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        uploaded_data = []
+        mock_ftp.storbinary.side_effect = lambda cmd, fp: uploaded_data.append(fp.read())
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._upload(
+            host="helmer.se",
+            user="testuser",
+            password="testpassword",
+            remote_dir="grib",
+            port=21,
+        )
+
+        assert mock_ftp.storbinary.call_args[0][0] == "STOR 2026110118.grib2"
+        assert uploaded_data == [b"LATEST_DATA"]
+
+    def test_upload_default_no_local_files_raises(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(FileNotFoundError, match="No local timestamped GRIB file found to upload"):
+            dgd._upload(host="helmer.se", user="testuser", password="pwd")
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +678,8 @@ class TestDownloadFtp:
         mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"NEW_GRIB_DATA")
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -690,9 +699,8 @@ class TestDownloadFtp:
         mock_ftp.nlst.return_value = ["2026110112.grib2", "2026110118.grib2"]
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -710,9 +718,8 @@ class TestDownloadFtp:
         mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"DATA")
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -729,9 +736,8 @@ class TestDownloadFtp:
         mock_ftp.nlst.return_value = ["readme.txt", "combined.grib"]
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -747,9 +753,8 @@ class TestDownloadFtp:
         mock_ftp.__enter__.return_value = mock_ftp
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -768,9 +773,8 @@ class TestDownloadFtp:
         mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"PATH_GRIB_DATA")
         monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
 
-        dest_file = tmp_path / "combined2.grib2"
         dgd._download_ftp(
-            str(dest_file),
+            str(tmp_path),
             host="helmer.se",
             user="user",
             password="pwd",
@@ -780,6 +784,23 @@ class TestDownloadFtp:
 
         assert mock_ftp.retrbinary.call_args[0][0] == "RETR 2026110118.grib2"
         assert (tmp_path / "2026110118.grib2").read_bytes() == b"PATH_GRIB_DATA"
+
+    def test_download_ftp_default_filepath_downloads_latest(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.nlst.return_value = ["2026110112.grib2", "2026110118.grib2"]
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"LATEST_GRIB_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dgd._download_ftp(
+            host="helmer.se",
+            user="user",
+            password="pwd",
+        )
+
+        assert mock_ftp.retrbinary.call_args[0][0] == "RETR 2026110118.grib2"
+        assert (tmp_path / "2026110118.grib2").read_bytes() == b"LATEST_GRIB_DATA"
 
     def test_download_ftp_update_non_timestamped_remote_file(self, monkeypatch, tmp_path):
         mock_ftp = MagicMock()
@@ -988,7 +1009,7 @@ class TestCli:
 
         assert result.exit_code == 0
         upload.assert_called_once_with(
-            dgd.FINAL_GRIB_FILE,
+            None,
             host="helmer.se",
             user=None,
             password=None,
@@ -1038,7 +1059,7 @@ class TestCli:
 
         assert result.exit_code == 0
         upload.assert_called_once_with(
-            dgd.FINAL_GRIB_FILE,
+            None,
             host="env.helmer.se",
             user="envuser",
             password="envpassword",
@@ -1054,7 +1075,7 @@ class TestCli:
 
         assert result.exit_code == 0
         download_ftp.assert_called_once_with(
-            filepath=dgd.FINAL_GRIB_FILE,
+            filepath=None,
             host="helmer.se",
             user=None,
             password=None,
@@ -1072,7 +1093,7 @@ class TestCli:
 
         assert result.exit_code == 0
         download_ftp.assert_called_once_with(
-            filepath=dgd.FINAL_GRIB_FILE,
+            filepath=None,
             host="helmer.se",
             user=None,
             password=None,
@@ -1127,7 +1148,7 @@ class TestCli:
 
         assert result.exit_code == 0
         download_ftp.assert_called_once_with(
-            filepath=dgd.FINAL_GRIB_FILE,
+            filepath=None,
             host="env.helmer.se",
             user="envuser",
             password="envpassword",
@@ -1145,7 +1166,7 @@ class TestCli:
 
         assert result.exit_code == 0
         download_ftp.assert_called_once_with(
-            filepath=dgd.FINAL_GRIB_FILE,
+            filepath=None,
             host="helmer.se",
             user=None,
             password=None,
@@ -1163,7 +1184,7 @@ class TestCli:
 
         assert result.exit_code == 0
         download_ftp.assert_called_once_with(
-            filepath=dgd.FINAL_GRIB_FILE,
+            filepath=None,
             host="helmer.se",
             user=None,
             password=None,

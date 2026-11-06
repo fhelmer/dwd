@@ -18,7 +18,6 @@ SINGLE_FIELDS = ["u_10m", "v_10m", "vmax_10m", "tot_prec", "t_2m", "cape_ml", "h
 FILE_PREFIX = "icon-d2_germany_regular-lat-lon_single-level"
 FILE_SUFFIX = "grib2.bz2"
 OUTPUT_FOLDER = "./downloaded_files"
-FINAL_GRIB_FILE = "combined2.grib2"
 DEFAULT_FTP_HOST = "helmer.se"
 DEFAULT_FTP_DIR = "grib"
 DEFAULT_FTP_PORT = 21
@@ -171,8 +170,8 @@ def _download_files_with_prefix(url, prefix, suffix, output_folder, session=None
     print(f"\n✅ Task completed! Downloaded {download_count} file(s) to '{output_folder}'.")
 
 
-def _postprocess(output_file: str | None = None) -> str:
-    filename = os.path.basename(output_file) if output_file else FINAL_GRIB_FILE
+def _postprocess(output_file: str) -> str:
+    filename = os.path.basename(output_file)
     click.echo("Uncompressing files...")
     run_command("bunzip2 *.bz2", cwd=OUTPUT_FOLDER)
     click.echo("Done. Merging all gribfiles into one ...")
@@ -270,7 +269,7 @@ def download(run_cycle_hour: int):
     _download(run_cycle_hour)
 
 def _upload(
-    filepath: str = FINAL_GRIB_FILE,
+    filepath: str | None = None,
     host: str = DEFAULT_FTP_HOST,
     user: str | None = None,
     password: str | None = None,
@@ -282,6 +281,12 @@ def _upload(
         host = host_part
         if dir_part and remote_dir == DEFAULT_FTP_DIR:
             remote_dir = dir_part
+
+    if filepath is None:
+        latest = find_latest_local_grib()
+        if latest is None:
+            raise FileNotFoundError("No local timestamped GRIB file found to upload.")
+        filepath = latest[1]
 
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"GRIB file not found: {filepath}")
@@ -326,7 +331,7 @@ def _upload(
 
 
 def _download_ftp(
-    filepath: str = FINAL_GRIB_FILE,
+    filepath: str | None = None,
     host: str = DEFAULT_FTP_HOST,
     user: str | None = None,
     password: str | None = None,
@@ -358,8 +363,18 @@ def _download_ftp(
 
     target_dir = remote_dir.strip("/") if not remote_dir.startswith("//") else "/" + remote_dir.lstrip("/")
 
-    dest_dir = os.path.dirname(filepath)
-    local_dir = dest_dir if dest_dir else "."
+    is_dir = False
+    if filepath:
+        if filepath.endswith(("/", "\\")) or os.path.isdir(filepath):
+            is_dir = True
+            dest_dir = filepath.rstrip("/\\")
+            local_dir = dest_dir if dest_dir else "."
+        else:
+            dest_dir = os.path.dirname(filepath)
+            local_dir = dest_dir if dest_dir else "."
+    else:
+        dest_dir = ""
+        local_dir = "."
 
     click.echo(f"Connecting to FTP server {host}:{port}...")
     with ftplib.FTP() as ftp:
@@ -390,15 +405,31 @@ def _download_ftp(
                         )
                         return
 
-            if os.path.isdir(filepath):
-                target_filepath = os.path.join(filepath, remote_filename)
-            elif os.path.basename(filepath) == FINAL_GRIB_FILE:
+            if filepath is None:
                 target_filepath = os.path.join(dest_dir, remote_filename) if dest_dir else remote_filename
+            elif is_dir:
+                target_filepath = os.path.join(dest_dir, remote_filename)
             else:
                 target_filepath = filepath
         else:
-            remote_filename = remote_file or os.path.basename(filepath)
-            target_filepath = filepath
+            if remote_file:
+                remote_filename = remote_file
+            elif filepath and not is_dir:
+                remote_filename = os.path.basename(filepath)
+            else:
+                remote_files = [os.path.basename(f) for f in ftp.nlst()]
+                latest_remote = find_latest_grib_file(remote_files)
+                if not latest_remote:
+                    click.echo("No timestamped GRIB files found on FTP server.")
+                    return
+                _, remote_filename = latest_remote
+
+            if filepath is None:
+                target_filepath = os.path.join(dest_dir, remote_filename) if dest_dir else remote_filename
+            elif is_dir:
+                target_filepath = os.path.join(dest_dir, remote_filename)
+            else:
+                target_filepath = filepath
 
         target_dest_dir = os.path.dirname(target_filepath)
         if target_dest_dir:
@@ -475,9 +506,9 @@ def makefinalgrib(
 
 
 @cli.command()
-@click.option('--file', 'filepath', default=FINAL_GRIB_FILE, show_default=True, help='GRIB file to upload')
+@click.option('--file', 'filepath', default=None, help='GRIB file to upload')
 @ftp_options
-def upload(filepath: str, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
+def upload(filepath: str | None, ftp_host: str, ftp_user: str | None, ftp_password: str | None, ftp_dir: str, ftp_port: int):
     """Upload GRIB file to FTP server."""
     _upload(
         filepath,
@@ -490,12 +521,12 @@ def upload(filepath: str, ftp_host: str, ftp_user: str | None, ftp_password: str
 
 
 @cli.command(name="downloadftp")
-@click.option('--file', '-o', '--output', 'filepath', default=FINAL_GRIB_FILE, show_default=True, help='GRIB file to download')
+@click.option('--file', '-o', '--output', 'filepath', default=None, help='GRIB file to download')
 @click.option('--remote-file', default=None, help='Remote filename on FTP server (defaults to basename of --file)')
 @click.option('--update', is_flag=True, default=False, help='Download only if there is a newer run cycle')
 @ftp_options
 def downloadftp(
-    filepath: str,
+    filepath: str | None,
     remote_file: str | None,
     update: bool,
     ftp_host: str,
