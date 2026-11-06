@@ -15,3 +15,8 @@ venv/
 downloaded_files/
 *.grib2
 *.grib2.bz2
+
+# Cron logs and local environment
+*.log
+.env
+

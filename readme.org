@@ -72,6 +72,36 @@ FTP upload and download default to =helmer.se/grib= port 21. Credentials can be 
   - =--file= (on =upload= and =downloadftp=)
   - =--remote-file= (on =downloadftp=)
 
+** Cron Automation
+
+The =run_cron.sh= script is designed to be executed periodically by crontab:
+
+#+begin_src sh
+# Default execution (runs: makefinalgrib --update)
+./run_cron.sh
+
+# Or pass custom arguments to dwd_grib_downloader.py
+./run_cron.sh downloadftp --update
+#+end_src
+
+Features:
+- Changes working directory to the project root automatically.
+- Prefers the local virtual environment Python (=.venv/bin/python3=).
+- Ensures =PATH= includes common utility locations for tools like =cdo= and =bunzip2=.
+- Automatically sources =.env= if present.
+- Uses =flock= to prevent concurrent overlapping cron executions.
+- Logs timestamps on execution start and finish.
+
+Example crontab entries:
+
+#+begin_src crontab
+# Run every 30 minutes and append logs
+*/30 * * * * /home/fredrikh/work/dwd/run_cron.sh >> /home/fredrikh/work/dwd/cron.log 2>&1
+
+# Run at minute 20 and 50 past each hour
+20,50 * * * * /home/fredrikh/work/dwd/run_cron.sh >> /home/fredrikh/work/dwd/cron.log 2>&1
+#+end_src
+
 ** Variables
 
 Downloaded (=SINGLE_FIELDS= in =dwd_grib_downloader.py=):
