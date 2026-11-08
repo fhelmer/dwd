@@ -202,7 +202,7 @@ def _postprocess(output_file: str, output_folder: str | None = None) -> str:
     click.echo("Done. Cleaning time series ...")
     run_command("cdo select,minute=0 combined.grib2 final.grib2", cwd=output_folder)
     click.echo("Done. Separate file for southern Sweden ...")
-    run_command(f"cdo sellonlatbox,10,14,54,57 final.grib2 ../{filename}", cwd=output_folder)
+    run_command(f"cdo sellonlatbox,9,17,54,58 final.grib2 ../{filename}", cwd=output_folder)
     click.echo("Done. Deleting all intermediate files ...")
     run_command("rm *.grib2", cwd=output_folder)
     click.echo("\n✅DONE")

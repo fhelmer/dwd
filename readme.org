@@ -77,11 +77,12 @@ FTP upload and download default to =helmer.se/grib= port 21. Credentials can be 
 The =run_cron.sh= script is designed to be executed periodically by crontab:
 
 #+begin_src sh
-# Default execution (runs: makefinalgrib --update)
-./run_cron.sh
+  # Default execution (runs: makefinalgrib --update)
+  ./run_cron.sh
 
-# Or pass custom arguments to dwd_grib_downloader.py
-./run_cron.sh downloadftp --update
+  # Or pass custom arguments to dwd_grib_downloader.py
+  ./run_cron.sh makefinalgrib --update
+
 #+end_src
 
 Features:
