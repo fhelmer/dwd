@@ -36,6 +36,9 @@ python3 dwd_grib_downloader.py downloadftp
 
 # Download from FTP only if there is a newer run cycle than existing local GRIB files
 python3 dwd_grib_downloader.py downloadftp --update
+
+# Clean up old GRIB files, keeping only the last 10 (default)
+python3 dwd_grib_downloader.py cleanup
 #+end_src
 
 =makefinalgrib= downloads into =./downloaded_files=, then:
@@ -43,10 +46,11 @@ python3 dwd_grib_downloader.py downloadftp --update
 1. =bunzip2 *.bz2=
 2. =cdo merge *.grib2 combined.grib2=
 3. =cdo select,minute=0 combined.grib2 final.grib2=
-4. =cdo sellonlatbox,10,14,54,57 final.grib2 ../YYYYMMDDHH.grib2=
-   (lon 10-14, lat 54-57, southern Sweden)
+4. =cdo sellonlatbox,9,17,54,58 final.grib2 ../YYYYMMDDHH.grib2=
+   (lon 9-17, lat 54-58, southern Sweden)
 5. Deletes the intermediate =*.grib2= files
 6. Uploads =./YYYYMMDDHH.grib2= to FTP server =helmer.se/grib= (skip with =--skip-upload=)
+7. Keeps only the last 10 GRIB files, deleting older ones (configurable with =--keep=)
 
 The result is =./YYYYMMDDHH.grib2= (e.g. =./2026110112.grib2=).
 
@@ -69,6 +73,7 @@ FTP upload and download default to =helmer.se/grib= port 21. Credentials can be 
   - =--ftp-port=
   - =--skip-upload= (on =makefinalgrib=)
   - =--update= (on =makefinalgrib= and =downloadftp=, only download if a newer run cycle exists)
+  - =--keep= (on =makefinalgrib=, =downloadftp=, and =cleanup=, number of latest GRIB files to keep, default: =10=, set to =0= to disable)
   - =--file= (on =upload= and =downloadftp=)
   - =--remote-file= (on =downloadftp=)
 

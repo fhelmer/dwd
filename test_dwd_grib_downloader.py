@@ -1,4 +1,5 @@
 import ftplib
+import os
 from datetime import datetime
 from unittest.mock import MagicMock, call
 
@@ -362,6 +363,95 @@ def test_find_latest_local_grib(tmp_path):
     assert dgd.find_latest_local_grib(str(tmp_path / "nonexistent")) is None
 
 
+def test_find_local_grib_files(tmp_path):
+    (tmp_path / "2026110118.grib2").touch()
+    (tmp_path / "2026110106.grib2").touch()
+    (tmp_path / "2026110112.grib2").touch()
+    (tmp_path / "other.txt").touch()
+    (tmp_path / "combined.grib2").touch()
+
+    files = dgd.find_local_grib_files(str(tmp_path))
+    assert len(files) == 3
+    assert [os.path.basename(f[1]) for f in files] == [
+        "2026110106.grib2",
+        "2026110112.grib2",
+        "2026110118.grib2",
+    ]
+    assert [f[0] for f in files] == [
+        datetime(2026, 11, 1, 6),
+        datetime(2026, 11, 1, 12),
+        datetime(2026, 11, 1, 18),
+    ]
+    assert dgd.find_local_grib_files(str(tmp_path / "nonexistent")) == []
+
+
+def test_cleanup_local_grib_files_keeps_last_10(tmp_path, capsys):
+    # Create 12 timestamped GRIB files
+    timestamps = [
+        "2026110100", "2026110103", "2026110106", "2026110109",
+        "2026110112", "2026110115", "2026110118", "2026110121",
+        "2026110200", "2026110203", "2026110206", "2026110209",
+    ]
+    for ts in timestamps:
+        (tmp_path / f"{ts}.grib2").touch()
+
+    deleted = dgd.cleanup_local_grib_files(str(tmp_path), keep=10)
+
+    # 2 oldest files should be deleted
+    assert len(deleted) == 2
+    assert [os.path.basename(p) for p in deleted] == ["2026110100.grib2", "2026110103.grib2"]
+    assert not (tmp_path / "2026110100.grib2").exists()
+    assert not (tmp_path / "2026110103.grib2").exists()
+
+    # Remaining 10 files should still exist
+    remaining = sorted(p.name for p in tmp_path.glob("*.grib2"))
+    assert len(remaining) == 10
+    assert remaining == [f"{ts}.grib2" for ts in timestamps[2:]]
+
+    out = capsys.readouterr().out
+    assert "Removed old GRIB file: 2026110100.grib2" in out
+    assert "Removed old GRIB file: 2026110103.grib2" in out
+
+
+def test_cleanup_local_grib_files_within_limit_does_nothing(tmp_path):
+    for h in ["06", "12", "18"]:
+        (tmp_path / f"20261101{h}.grib2").touch()
+
+    deleted = dgd.cleanup_local_grib_files(str(tmp_path), keep=10)
+
+    assert deleted == []
+    assert len(list(tmp_path.glob("*.grib2"))) == 3
+
+
+def test_cleanup_local_grib_files_disabled_when_zero_or_negative(tmp_path):
+    for h in ["06", "12", "18"]:
+        (tmp_path / f"20261101{h}.grib2").touch()
+
+    assert dgd.cleanup_local_grib_files(str(tmp_path), keep=0) == []
+    assert dgd.cleanup_local_grib_files(str(tmp_path), keep=-1) == []
+    assert len(list(tmp_path.glob("*.grib2"))) == 3
+
+
+def test_cleanup_local_grib_files_nonexistent_directory(tmp_path):
+    assert dgd.cleanup_local_grib_files(str(tmp_path / "nonexistent"), keep=10) == []
+
+
+def test_cleanup_local_grib_files_handles_oserror(monkeypatch, tmp_path, capsys):
+    (tmp_path / "2026110100.grib2").touch()
+    (tmp_path / "2026110103.grib2").touch()
+
+    def mock_remove(path):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(dgd.os, "remove", mock_remove)
+
+    deleted = dgd.cleanup_local_grib_files(str(tmp_path), keep=1)
+
+    assert deleted == []
+    out = capsys.readouterr().out
+    assert "Failed to remove" in out
+
+
 def test_download_fetches_every_single_field(monkeypatch):
     fetch = MagicMock()
     monkeypatch.setattr(dgd, "_download_files_with_prefix", fetch)
@@ -389,7 +479,7 @@ def test_postprocess_runs_pipeline_in_order(monkeypatch, tmp_path):
         "bunzip2 b.bz2",
         "cdo merge *.grib2 combined.grib2",
         "cdo select,minute=0 combined.grib2 final.grib2",
-        "cdo sellonlatbox,10,14,54,57 final.grib2 ../2026092412.grib2",
+        "cdo sellonlatbox,9,17,54,58 final.grib2 ../2026092412.grib2",
         "rm *.grib2",
     ]
     assert all(c.kwargs["cwd"] == str(tmp_path) for c in run.call_args_list)
@@ -882,6 +972,30 @@ class TestDownloadFtp:
         assert mock_ftp.retrbinary.call_args[0][0] == "RETR custom.grib2"
         assert dest_file.read_bytes() == b"CUSTOM_DATA"
 
+    def test_download_ftp_cleans_up_old_files(self, monkeypatch, tmp_path):
+        for h in range(11):
+            (tmp_path / f"20261101{h:02d}.grib2").touch()
+
+        mock_ftp = MagicMock()
+        mock_ftp.__enter__.return_value = mock_ftp
+        mock_ftp.retrbinary.side_effect = lambda cmd, cb: cb(b"NEW_DATA")
+        monkeypatch.setattr(dgd.ftplib, "FTP", MagicMock(return_value=mock_ftp))
+
+        dest_file = tmp_path / "2026110111.grib2"
+        dgd._download_ftp(
+            str(dest_file),
+            host="helmer.se",
+            user="user",
+            password="pwd",
+            keep=10,
+        )
+
+        assert dest_file.read_bytes() == b"NEW_DATA"
+        remaining = sorted(p.name for p in tmp_path.glob("*.grib2"))
+        assert len(remaining) == 10
+        assert "2026110100.grib2" not in remaining
+        assert "2026110101.grib2" not in remaining or "2026110111.grib2" in remaining
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1144,6 +1258,7 @@ class TestCli:
             port=21,
             remote_file=None,
             update=False,
+            keep=10,
         )
 
     def test_downloadftp_command_update_flag(self, monkeypatch):
@@ -1162,6 +1277,7 @@ class TestCli:
             port=21,
             remote_file=None,
             update=True,
+            keep=10,
         )
 
     def test_downloadftp_command_custom_options(self, monkeypatch):
@@ -1177,6 +1293,7 @@ class TestCli:
             "--ftp-password", "pass1",
             "--ftp-dir", "weather",
             "--ftp-port", "2121",
+            "--keep", "5",
         ])
 
         assert result.exit_code == 0
@@ -1189,6 +1306,7 @@ class TestCli:
             port=2121,
             remote_file="remote_archive.grib2",
             update=False,
+            keep=5,
         )
 
     def test_downloadftp_command_env_vars(self, monkeypatch):
@@ -1217,6 +1335,7 @@ class TestCli:
             port=2122,
             remote_file=None,
             update=False,
+            keep=10,
         )
 
     def test_download_ftp_alias_command(self, monkeypatch):
@@ -1235,6 +1354,7 @@ class TestCli:
             port=21,
             remote_file=None,
             update=False,
+            keep=10,
         )
 
     def test_download_ftp_underscore_alias_command(self, monkeypatch):
@@ -1253,4 +1373,69 @@ class TestCli:
             port=21,
             remote_file=None,
             update=False,
+            keep=10,
         )
+
+    def test_cleanup_command_deletes_excess_files(self, tmp_path):
+        for h in range(12):
+            (tmp_path / f"20261101{h:02d}.grib2").touch()
+
+        result = CliRunner().invoke(dgd.cli, ["cleanup", "--directory", str(tmp_path), "--keep", "10"])
+
+        assert result.exit_code == 0
+        assert "Removed old GRIB file: 2026110100.grib2" in result.output
+        assert "Removed old GRIB file: 2026110101.grib2" in result.output
+        assert "Cleanup completed: removed 2 file(s), kept 10." in result.output
+        assert len(list(tmp_path.glob("*.grib2"))) == 10
+
+    def test_cleanup_command_no_files_to_clean(self, tmp_path):
+        (tmp_path / "2026110100.grib2").touch()
+
+        result = CliRunner().invoke(dgd.cli, ["cleanup", "--directory", str(tmp_path), "--keep", "10"])
+
+        assert result.exit_code == 0
+        assert "No GRIB files needed cleanup (keeping 10)." in result.output
+
+    def test_prune_alias_command(self, tmp_path):
+        for h in range(5):
+            (tmp_path / f"20261101{h:02d}.grib2").touch()
+
+        result = CliRunner().invoke(dgd.cli, ["prune", "--directory", str(tmp_path), "--keep", "3"])
+
+        assert result.exit_code == 0
+        assert "Cleanup completed: removed 2 file(s), kept 3." in result.output
+        assert len(list(tmp_path.glob("*.grib2"))) == 3
+
+    def test_makefinalgrib_cleans_up_old_files(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        for h in range(12):
+            (tmp_path / f"20261101{h:02d}.grib2").touch()
+
+        monkeypatch.setattr(dgd, "_findlatest", MagicMock(return_value=datetime(2026, 11, 2, 12)))
+        monkeypatch.setattr(dgd, "_download", MagicMock())
+        monkeypatch.setattr(dgd, "_postprocess", MagicMock())
+        monkeypatch.setattr(dgd, "_upload", MagicMock())
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--skip-upload", "--keep", "10"])
+
+        assert result.exit_code == 0
+        remaining = sorted(p.name for p in tmp_path.glob("*.grib2"))
+        assert len(remaining) == 10
+        assert "2026110100.grib2" not in remaining
+        assert "2026110101.grib2" not in remaining
+
+    def test_makefinalgrib_update_already_up_to_date_cleans_up(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        for h in range(12):
+            (tmp_path / f"20261101{h:02d}.grib2").touch()
+
+        monkeypatch.setattr(dgd, "_findlatest", MagicMock(return_value=datetime(2026, 11, 1, 11)))
+
+        result = CliRunner().invoke(dgd.cli, ["makefinalgrib", "--update", "--keep", "10"])
+
+        assert result.exit_code == 0
+        assert "Already up to date" in result.output
+        remaining = sorted(p.name for p in tmp_path.glob("*.grib2"))
+        assert len(remaining) == 10
+        assert "2026110100.grib2" not in remaining
+        assert "2026110101.grib2" not in remaining

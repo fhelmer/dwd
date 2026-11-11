@@ -22,6 +22,7 @@ OUTPUT_FOLDER = "./downloaded_files"
 DEFAULT_FTP_HOST = "helmer.se"
 DEFAULT_FTP_DIR = "grib"
 DEFAULT_FTP_PORT = 21
+DEFAULT_KEEP_FILES = 10
 
 DEFAULT_TIMEOUT = (10, 60)
 USER_AGENT = "dwd-grib-downloader/1.0 (https://opendata.dwd.de; weather data ingest)"
@@ -98,6 +99,43 @@ def find_latest_grib_file(filenames: list[str]) -> tuple[datetime, str] | None:
     if latest_dt is not None and latest_fn is not None:
         return latest_dt, latest_fn
     return None
+
+
+def find_local_grib_files(directory: str = ".") -> list[tuple[datetime, str]]:
+    """Find all timestamped GRIB files in directory, sorted chronologically (oldest first)."""
+    if not os.path.isdir(directory):
+        return []
+    try:
+        filenames = os.listdir(directory)
+    except OSError:
+        return []
+    files: list[tuple[datetime, str]] = []
+    for fn in filenames:
+        dt = parse_grib_filename(fn)
+        if dt is not None:
+            files.append((dt, os.path.join(directory, fn)))
+    files.sort(key=lambda item: (item[0], item[1]))
+    return files
+
+
+def cleanup_local_grib_files(directory: str = ".", keep: int = DEFAULT_KEEP_FILES) -> list[str]:
+    """Keep only the latest `keep` timestamped GRIB files in `directory`. Older files are deleted."""
+    if keep <= 0:
+        return []
+    files = find_local_grib_files(directory)
+    if len(files) <= keep:
+        return []
+
+    to_delete = files[:-keep]
+    deleted = []
+    for _, filepath in to_delete:
+        try:
+            os.remove(filepath)
+            deleted.append(filepath)
+            click.echo(f"Removed old GRIB file: {os.path.basename(filepath)}")
+        except OSError as e:
+            click.echo(f"Failed to remove {filepath}: {e}")
+    return deleted
 
 
 def find_latest_local_grib(directory: str = ".") -> tuple[datetime, str] | None:
@@ -362,6 +400,7 @@ def _download_ftp(
     port: int = DEFAULT_FTP_PORT,
     remote_file: str | None = None,
     update: bool = False,
+    keep: int = DEFAULT_KEEP_FILES,
 ) -> None:
     if "/" in host:
         host_part, _, dir_part = host.partition("/")
@@ -426,6 +465,8 @@ def _download_ftp(
                         click.echo(
                             f"Already up to date: local file {local_filename} is as new or newer than remote {remote_filename}."
                         )
+                        if keep > 0:
+                            cleanup_local_grib_files(local_dir, keep=keep)
                         return
 
             if filepath is None:
@@ -470,6 +511,8 @@ def _download_ftp(
                 os.remove(temp_file_path)
             raise
         click.echo(f"✅ Successfully downloaded {remote_filename} to {target_filepath}")
+        if keep > 0:
+            cleanup_local_grib_files(local_dir, keep=keep)
 
 
 def ftp_options(f):
@@ -484,10 +527,12 @@ def ftp_options(f):
 @cli.command()
 @click.option('--skip-upload', is_flag=True, default=False, help='Skip FTP upload')
 @click.option('--update', is_flag=True, default=False, help='Download and build only if there is a newer run cycle')
+@click.option('--keep', default=DEFAULT_KEEP_FILES, show_default=True, type=int, help='Number of latest local GRIB files to keep')
 @ftp_options
 def makefinalgrib(
     skip_upload: bool,
     update: bool,
+    keep: int,
     ftp_host: str,
     ftp_user: str | None,
     ftp_password: str | None,
@@ -513,6 +558,8 @@ def makefinalgrib(
                 click.echo(
                     f"Already up to date: local file {local_filename} is as new or newer than latest run cycle {filename}."
                 )
+                if keep > 0:
+                    cleanup_local_grib_files(".", keep=keep)
                 return
 
     _download(run_cycle_hour)
@@ -526,6 +573,8 @@ def makefinalgrib(
             remote_dir=ftp_dir,
             port=ftp_port,
         )
+    if keep > 0:
+        cleanup_local_grib_files(".", keep=keep)
 
 
 @cli.command()
@@ -547,11 +596,13 @@ def upload(filepath: str | None, ftp_host: str, ftp_user: str | None, ftp_passwo
 @click.option('--file', '-o', '--output', 'filepath', default=None, help='GRIB file to download')
 @click.option('--remote-file', default=None, help='Remote filename on FTP server (defaults to basename of --file)')
 @click.option('--update', is_flag=True, default=False, help='Download only if there is a newer run cycle')
+@click.option('--keep', default=DEFAULT_KEEP_FILES, show_default=True, type=int, help='Number of latest local GRIB files to keep')
 @ftp_options
 def downloadftp(
     filepath: str | None,
     remote_file: str | None,
     update: bool,
+    keep: int,
     ftp_host: str,
     ftp_user: str | None,
     ftp_password: str | None,
@@ -568,7 +619,31 @@ def downloadftp(
         port=ftp_port,
         remote_file=remote_file,
         update=update,
+        keep=keep,
     )
+
+
+@cli.command()
+@click.option('--directory', '-d', default='.', show_default=True, help='Directory containing GRIB files')
+@click.option('--keep', default=DEFAULT_KEEP_FILES, show_default=True, type=int, help='Number of latest GRIB files to keep')
+def cleanup(directory: str, keep: int):
+    """Keep only the latest GRIB files in a directory, removing older ones."""
+    deleted = cleanup_local_grib_files(directory, keep=keep)
+    if not deleted:
+        click.echo(f"No GRIB files needed cleanup (keeping {keep}).")
+    else:
+        click.echo(f"Cleanup completed: removed {len(deleted)} file(s), kept {keep}.")
+
+
+cli.add_command(
+    click.Command(
+        "prune",
+        callback=cleanup.callback,
+        params=cleanup.params,
+        help=cleanup.help,
+        hidden=True,
+    )
+)
 
 
 cli.add_command(
